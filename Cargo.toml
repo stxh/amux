@@ -1,6 +1,6 @@
 [package]
 name = "amux"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 description = "A cross-platform terminal multiplexer combining Alacritty terminal backend with Xilem/Vello GPU-accelerated rendering"
 

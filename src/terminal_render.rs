@@ -131,16 +131,17 @@ pub fn render_terminal_with_offset(
     let display_offset = terminal.display_offset() + pane_state.scroll_offset;
     let cols = grid.columns();
     let total_lines = grid.total_lines();
+    let screen_lines = grid.screen_lines();
 
     let cursor = terminal.cursor();
     let cursor_col = cursor.column.0;
     let cursor_line = cursor.line.0;
 
+    // Calculate cell dimensions based on actual screen lines
     let cell_w = size.width / cols as f64;
-    let cell_h = size.height / 24.0;
-    let screen_rows = 24usize.min(total_lines);
+    let cell_h = size.height / screen_lines as f64;
 
-    for row_idx in 0..screen_rows {
+    for row_idx in 0..screen_lines {
         let actual_row = row_idx + display_offset;
         if actual_row >= total_lines {
             break;
@@ -219,7 +220,8 @@ pub fn render_terminal_with_offset(
 
         // Render text for this row using parley
         if !row_text.is_empty() {
-            let font_size = (cell_h * 0.75) as f32;
+            // Use cell_h directly as font size - should give correct sizing
+            let font_size = cell_h as f32 * 0.7;
             let mut builder = lcx.ranged_builder(fcx, &row_text, 1.0, true);
             builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
                 FontFamilyName::Generic(GenericFamily::Monospace),
@@ -230,8 +232,8 @@ pub fn render_terminal_with_offset(
             layout.break_all_lines(None);
             layout.align(None, Alignment::Start, AlignmentOptions::default());
             
-            // Position the text - calculate baseline position
-            let text_y_base = y + cell_h * 0.15;
+            // Position baseline at about 78% of cell from top
+            let text_y_base = y + cell_h * 0.78;
             let transform = Affine::translate((offset_x, text_y_base));
             
             // Use default text color
@@ -241,7 +243,7 @@ pub fn render_terminal_with_offset(
     }
 
     // Draw cursor block
-    if is_active && cursor_line >= 0 && (cursor_line as usize) < 24 && cursor_col < cols as usize {
+    if is_active && cursor_line >= 0 && (cursor_line as usize) < screen_lines && cursor_col < cols as usize {
         let cursor_y = offset_y + cursor_line as f64 * cell_h;
         let cursor_x = offset_x + cursor_col as f64 * cell_w;
         let cursor_rect = Rect::new(cursor_x, cursor_y, cursor_x + cell_w, cursor_y + cell_h);

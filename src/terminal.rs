@@ -23,10 +23,10 @@ pub struct TerminalConfig {
 impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
-            rows: 24,
+            rows: 30,
             cols: 80,
             cell_width: 10,
-            cell_height: 20,
+            cell_height: 28,
         }
     }
 }

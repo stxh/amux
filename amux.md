@@ -341,3 +341,85 @@ render_text(painter, transform, &layout, brushes, true);
 ```bash
 git tag -a v0.0.2 -m "实现真实文字渲染：使用parley布局，render_text渲染字形"
 ```
+
+---
+
+### v0.0.3 - 终端尺寸修复 (2026-04-27)
+
+#### 问题诊断
+
+**问题**：终端垂直方向尺寸错误，canvas接收到的`size.height`只有100px，导致文字非常小无法辨认。
+
+**根本原因**：
+1. Xilem的Canvas widget在measure时，如果没有收到`FitContent`类型的长度请求，会返回`DEFAULT_LENGTH = 100px`
+2. Canvas没有实现`WidgetView` trait，因此无法使用`FlexExt`的`.flex()`方法
+3. flex_col布局中，Canvas作为非flex子元素只获得了默认最小高度
+
+**诊断过程**：
+- 在标签栏和终端区域添加黄色调试文字显示canvas size
+- 发现标签栏`sz=150x28`正常，但终端区`size=1200x100`异常
+- 使用固定48pt字体测试确认parley渲染本身正常
+- 检查Masonry的canvas measure源码发现`DEFAULT_LENGTH = Length::const_px(100.)`
+
+#### 解决方案
+
+**Workaround**：使用`sized_box`包装canvas并设置固定高度
+
+```rust
+const TERMINAL_HEIGHT: f64 = 700.0; // Good default for 800px window
+
+let terminal_box = sized_box(terminal_area)
+    .fixed_height(Length::px(TERMINAL_HEIGHT));
+
+flex_col((
+    tab_bar(),
+    terminal_box,
+    status_bar(),
+))
+```
+
+**效果**：
+- 终端区域高度从100px增加到700px
+- 文字大小正常可识别
+- 字体约23px（cell_h * 0.7）
+
+#### 技术细节
+
+**Canvas尺寸计算流程**：
+```
+Window (800px)
+  └─ flex_col
+      ├─ tab_bar (28px fixed)
+      ├─ terminal_area (100px default → 700px with sized_box)
+      └─ status_bar (~30px auto)
+```
+
+**Masonry Canvas measure源码**：
+```rust
+fn measure(...) -> f64 {
+    match len_req {
+        LenReq::FitContent(space) => space,  // 使用所有可用空间
+        _ => DEFAULT_LENGTH.dp(scale),       // 默认100px
+    }
+}
+```
+
+#### 已知限制
+
+- 终端高度700px是硬编码值，窗口大小变化时不会自动调整
+- 完美解决方案需要Xilem增加Canvas的flex factor支持
+- 未来Xilem版本可能添加Canvas的WidgetView实现，届时可使用`.flex(1.0)`
+
+#### 文件变更
+
+- `Cargo.toml`: 版本更新为0.0.3
+- `src/main.rs`: 使用sized_box包装terminal_area并设置固定高度
+- `src/terminal_render.rs`: 
+  - 修复screen_lines使用动态值而非硬编码24
+  - 移除调试代码
+  - 优化字体大小和baseline计算
+
+#### Git标签
+```bash
+git tag -a v0.0.3 -m "修复终端尺寸：canvas高度从100px增加到700px，文字正常可识别"
+```

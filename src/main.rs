@@ -35,14 +35,14 @@ fn tab_bar() -> impl WidgetView<App> + use<> {
                         xilem::masonry::parley::style::GenericFamily::Monospace,
                     ),
                 ));
-                builder.push_default(xilem::masonry::parley::style::StyleProperty::FontSize(16.0));
+                builder.push_default(xilem::masonry::parley::style::StyleProperty::FontSize(14.0));
                 
                 let mut layout = builder.build(&text);
                 layout.break_all_lines(None);
                 layout.align(None, xilem::masonry::parley::Alignment::Start, 
                     xilem::masonry::parley::AlignmentOptions::default());
                 
-                let transform = xilem::masonry::kurbo::Affine::translate((8.0, 6.0));
+                let transform = xilem::masonry::kurbo::Affine::translate((8.0, 5.0));
                 xilem::masonry::core::render_text(&mut painter, transform, &layout, &[xilem::masonry::peniko::Brush::Solid(
                     Color::from_rgba8(0xc6, 0xd0, 0xf5, 0xff)
                 )], true);
@@ -118,21 +118,25 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
         }
     }).alt_text("Terminal multiplexer output");
 
-    // cmux-style layout:
-    // +----------------------------------+
-    // | Tab Bar (Pane info + buttons)    |  <- 固定高度 28px
-    // +----------------------------------+
-    // |                                  |
-    // |                                  |
-    // |    Terminal Area (flex 填充)     |  <- 自动填充剩余空间
-    // |                                  |
-    // |                                  |
-    // +----------------------------------+
-    // | Status Bar (shortcuts)           |  <- 固定高度
-    // +----------------------------------+
+    // cmux-style layout using flex with spacers to control sizing
+    // Tab bar: 28px fixed
+    // Terminal: fills remaining space  
+    // Status bar: auto size
+    // Calculate terminal height dynamically based on window size
+    // Window is 800px initially, tab_bar is 28px, status_bar is ~30px
+    // So terminal should be about 800 - 28 - 30 = 742px
+    // We'll use a reasonable default and let the canvas handle resizing
+    // 
+    // NOTE: This is a workaround for Canvas not implementing WidgetView/FlexItem.
+    // Once Xilem adds proper flex factor support for canvas, we can use flex(1.0).
+    const TERMINAL_HEIGHT: f64 = 700.0; // Good default for 800px window
+    
+    let terminal_box = sized_box(terminal_area)
+        .fixed_height(Length::px(TERMINAL_HEIGHT));
+    
     flex_col((
         tab_bar(),
-        terminal_area,  // canvas会自动填充flex中的可用空间
+        terminal_box,
         status_bar(),
     ))
 }
