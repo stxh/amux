@@ -31,7 +31,16 @@ impl App {
         let config = TerminalConfig::default();
         let mut first_pane = Pane::new(1, &config);
         first_pane.set_active(true);
-        // Spawn the shell for the first pane
+        
+        // Set initial layout: single pane fills entire area
+        first_pane.layout = PaneLayout {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        };
+        
+        // Spawn the shell for the first pane (PowerShell on Windows)
         if let Err(e) = first_pane.terminal.spawn_shell() {
             eprintln!("Failed to spawn shell: {}", e);
         }
@@ -44,7 +53,7 @@ impl App {
             terminal_config: config,
             prefix_mode: false,
             prefix_indicator: "".to_string(),
-            status_message: "Ready".to_string(),
+            status_message: "Ready - Press + to split vertically, - to split horizontally".to_string(),
             running: true,
         }
     }

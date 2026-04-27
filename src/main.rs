@@ -6,38 +6,56 @@ mod terminal_render;
 
 use app::App;
 use pane::LayoutMode;
-use xilem::view::{button, canvas, flex_col, label};
+use xilem::view::{button, canvas, flex_col, label, flex_row, sized_box};
 use xilem::style::Style;
+use xilem::masonry::layout::Length;
 use xilem::{EventLoop, WidgetView, WindowOptions, Xilem};
 use xilem::dpi::LogicalSize;
+use xilem::masonry::peniko::Color;
 
-/// Status bar
-fn status_bar() -> impl WidgetView<App> + use<> {
-    label("Ctrl+B: prefix | c:split-v | %:split-h | n:next | p:prev | x:close | Scroll: mouse wheel / Shift+PgUp/PgDn")
-}
-
-/// Button bar for mouse-based actions
-fn action_buttons() -> impl WidgetView<App> + use<> {
-    flex_col((
-        button(label("Split Vertical"), |data: &mut App| {
+/// Tab bar with pane indicator and action buttons
+fn tab_bar() -> impl WidgetView<App> + use<> {
+    let bg_color = Color::from_rgba8(0x31, 0x32, 0x44, 0xff); // Catppuccin Surface0
+    
+    flex_row((
+        // Left side: current pane indicator (dynamic canvas)
+        sized_box(
+            canvas(move |state: &mut App, _ctx, scene, size| {
+                let mut painter = xilem::masonry::imaging::Painter::new(scene);
+                let rect = size.to_rect();
+                painter.fill(&rect, bg_color).draw();
+                
+                // Draw simple pane indicator block
+                let text = format!("Pane {}/{}", state.active_pane_index + 1, state.panes.len());
+                let text_rect = xilem::masonry::kurbo::Rect::new(8.0, 6.0, 8.0 + (text.len() as f64 * 7.0), 22.0);
+                painter.fill(&text_rect, Color::from_rgba8(0xc6, 0xd0, 0xf5, 0xff)).draw();
+            }).alt_text("Pane indicator")
+        ).fixed_width(Length::px(150.0)).fixed_height(Length::px(28.0)),
+        
+        // Right side: action buttons
+        button(label("+"), |data: &mut App| {
             data.split_pane(LayoutMode::Vertical);
         }),
-        button(label("Split Horizontal"), |data: &mut App| {
+        button(label("-"), |data: &mut App| {
             data.split_pane(LayoutMode::Horizontal);
         }),
-        button(label("Next Pane"), |data: &mut App| {
-            data.next_pane();
-        }),
-        button(label("Prev Pane"), |data: &mut App| {
+        button(label("<"), |data: &mut App| {
             data.prev_pane();
         }),
-        button(label("Close Pane"), |data: &mut App| {
-            data.close_pane();
+        button(label(">"), |data: &mut App| {
+            data.next_pane();
         }),
     ))
-    .padding(8.0)
+    .background(bg_color)
 }
 
+/// Status bar showing keyboard shortcuts
+fn status_bar() -> impl WidgetView<App> + use<> {
+    label("Ctrl+B: prefix | c:split-v | d:split-h | n:next | p:prev | x:close | Shift+PgUp/PgDn: scroll")
+        .padding(4.0)
+}
+
+/// Main application layout with cmux-style design
 fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
     let active_idx = data.active_pane_index;
     
@@ -47,7 +65,7 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
         
         // Background
         let bg_rect = window_size.to_rect();
-        painter.fill(&bg_rect, xilem::masonry::peniko::Color::from_rgba8(0x11, 0x11, 0x1b, 0xff)).draw();
+        painter.fill(&bg_rect, Color::from_rgba8(0x1e, 0x1e, 0x2e, 0xff)).draw(); // Catppuccin Base
         
         // Render all panes in their layout positions
         for (pane_idx, pane) in state.panes.iter().enumerate() {
@@ -75,7 +93,20 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
         }
     }).alt_text("Terminal multiplexer output");
 
+    // cmux-style layout:
+    // +----------------------------------+
+    // | Tab Bar (Pane info + buttons)    |
+    // +----------------------------------+
+    // |                                  |
+    // |                                  |
+    // |    Terminal Area (full size)     |
+    // |                                  |
+    // |                                  |
+    // +----------------------------------+
+    // | Status Bar (shortcuts)           |
+    // +----------------------------------+
     flex_col((
+        tab_bar(),
         terminal_area,
         status_bar(),
     ))
