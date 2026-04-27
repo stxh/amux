@@ -122,3 +122,136 @@ fn main() {
 3. **快捷键捕捉**: 在 `winit` 事件循环中拦截 `Ctrl+B` (或你自定义的 Prefix)，用于动态更新 `CmuxApp` 中的 `panes` 向量。
 
 这个架构虽然处于技术最前沿，但一旦跑通，cmux 将拥有目前市面上终端中最强大的跨平台 GUI 渲染能力。
+
+---
+
+## 开发日志
+
+### v0.0.1 - 初始版本 (2026-04-27)
+
+#### 实现概述
+成功实现cmux风格的终端复用器基础架构，包含完整的UI布局、PTY集成和多窗格管理。
+
+#### 核心特性
+
+**1. cmux风格布局**
+```
++------------------------------------------+
+| [Pane 1/1]  [+] [-] [<] [>]  (标签行)    |
++------------------------------------------+
+|                                          |
+|        终端窗格 (PowerShell)             |
+|                                          |
++------------------------------------------+
+| Ctrl+B: prefix | c:split-v | d:split...  |
++------------------------------------------+
+```
+
+- 顶部标签行：动态显示当前窗格信息 (Pane X/Y)
+- 4个操作按钮：+ (垂直分割), - (水平分割), < (上一窗格), > (下一窗格)
+- 终端区域：填满剩余窗口空间
+- 底部状态栏：显示键盘快捷键提示
+
+**2. 终端渲染**
+- 使用Xilem的canvas进行GPU加速渲染 (Vello imaging后端)
+- 支持完整的256色ANSI调色板
+- 正确转换alacritty_terminal的TermColor到peniko Color
+- 实现单元格标志渲染：Bold, Underline, Strikethrough, Inverse
+- 活动窗格光标渲染 (rosewater颜色)
+- 滚动指示器显示
+
+**3. PTY集成**
+- 每个窗格独立的shell进程 (Windows: PowerShell)
+- 后台线程异步读取PTY输出
+- 输出馈入alacritty_terminal解析器
+- 正确处理终端状态变更事件
+
+**4. 多窗格管理**
+- 垂直分割 (上下布局)
+- 水平分割 (左右布局)
+- 窗格导航 (上一个/下一个)
+- 关闭窗格
+- 使用归一化坐标 (0.0-1.0) 的响应式布局系统
+
+**5. 状态管理**
+```rust
+App {
+    panes: Vec<Pane>,              // 终端窗格列表
+    pane_states: Vec<TerminalPaneState>,  // UI状态 (滚动、焦点)
+    active_pane_index: usize,      // 当前活动窗格索引
+    next_pane_id: usize,           // 下一个窗格ID
+    terminal_config: TerminalConfig,
+    prefix_mode: bool,
+    status_message: String,
+    running: bool,
+}
+```
+
+#### 技术栈
+- **Rust 2021 Edition**
+- **alacritty_terminal 0.24.0** - 终端模拟后端
+- **Xilem (git)** - 声明式UI框架
+- **Vello** - GPU加速2D图形渲染
+- **portable-pty 0.8** - 跨平台PTY管理
+- **parley 0.8** - 文本布局 (未来使用)
+- **skrifa 0.40** - 字体处理 (未来使用)
+- **peniko 0.6** - 颜色处理
+
+#### 配色方案
+使用 **Catppuccin Mocha** 主题：
+- Crust: #11111b (最深背景)
+- Base: #1e1e2e (终端背景)
+- Surface0: #313244 (标签行背景)
+- Text: #c6d0f5 (前景文本)
+- Blue: #89b4fa (活动窗格边框)
+- Rosewater: #f5e0dc (光标)
+
+#### 文件结构
+```
+amux/
+├── Cargo.toml           # 项目依赖
+├── README.md            # 项目文档
+├── amux.md              # 开发文档
+└── src/
+    ├── main.rs          # 应用入口和UI布局
+    ├── app.rs           # 全局状态管理
+    ├── pane.rs          # 窗格表示和布局几何
+    ├── terminal.rs      # Alacritty终端包装器 (PTY I/O)
+    ├── terminal_render.rs  # Canvas终端渲染
+    ├── terminal_widget.rs  # 自定义Masonry widget (备用)
+    └── keyboard.rs      # 键盘输入处理模块
+```
+
+#### 构建与运行
+```bash
+# 开发构建
+cargo build
+
+# 运行
+cargo run
+
+# 发布构建
+cargo build --release
+```
+
+#### 已知限制
+- 文本当前渲染为彩色块 (字符单元格的纯色填充)
+- 真正的字形渲染需要更深入的parley/skrifa集成
+- 键盘快捷键尚未完全实现 (目前仅按钮)
+- 鼠标文本选择未实现
+- 复制/粘贴支持待添加
+
+#### 下一步计划
+- [ ] 使用parley/skrifa实现真实文本渲染
+- [ ] 实现完整的键盘快捷键 (Ctrl+B前缀)
+- [ ] 鼠标事件处理 (点击选择窗格)
+- [ ] 文本选择和复制粘贴
+- [ ] 滚动缓冲区导航
+- [ ] 窗格缩放 (聚焦单个窗格)
+- [ ] 配置文件支持
+- [ ] 状态栏自定义
+
+#### Git标签
+```bash
+git tag -a v0.0.1 -m "初始版本：cmux风格布局与PowerShell终端"
+```
