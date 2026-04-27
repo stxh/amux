@@ -39,7 +39,6 @@ fn action_buttons() -> impl WidgetView<App> + use<> {
 }
 
 fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
-    let num_panes = data.panes.len();
     let active_idx = data.active_pane_index;
     
     // Create a terminal canvas that renders ALL panes in their layout positions
@@ -63,7 +62,7 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
             
             let pane_size = xilem::masonry::kurbo::Size::new(w, h);
             
-            // Render the terminal - we'll modify render_terminal to accept an offset
+            // Render the terminal with offset
             terminal_render::render_terminal_with_offset(
                 &mut painter,
                 &pane.terminal,

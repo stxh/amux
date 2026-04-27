@@ -1,7 +1,6 @@
 /// Terminal canvas rendering - renders terminal grid onto a canvas surface
 ///
-/// This module provides functions to render terminal grids using Xilem's canvas pattern,
-/// avoiding the complexity of custom widget integration.
+/// This module provides functions to render terminal grids using Xilem's canvas pattern.
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
@@ -180,8 +179,8 @@ pub fn render_terminal_with_offset(
                 continue;
             }
 
-            // Character block (colored rectangle representing the glyph)
-            let char_margin = 0.5;
+            // Character block (use smaller filled rect to represent the glyph)
+            let char_margin = 1.5;
             let char_rect = Rect::new(
                 x + char_margin,
                 y + char_margin,
