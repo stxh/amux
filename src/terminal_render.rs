@@ -7,9 +7,12 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor, Rgb};
 
-use xilem::masonry::imaging::Painter;
-use xilem::masonry::kurbo::{Rect, Size, Stroke};
-use xilem::masonry::peniko::Color;
+use xilem::masonry::core::render_text;
+use xilem::masonry::imaging::{Painter, record::Scene};
+use xilem::masonry::kurbo::{Affine, Rect, Size, Stroke};
+use xilem::masonry::parley::style::{FontFamily, FontFamilyName, GenericFamily, StyleProperty};
+use xilem::masonry::parley::{Alignment, AlignmentOptions, Layout};
+use xilem::masonry::peniko::{Brush, Color};
 
 use crate::terminal::Terminal;
 use crate::app::App;
@@ -110,13 +113,15 @@ impl TerminalPaneState {
 /// This function renders a terminal at a specific position within the canvas,
 /// allowing multiple panes to be rendered in their layout positions.
 pub fn render_terminal_with_offset(
-    painter: &mut Painter<'_, xilem::masonry::imaging::record::Scene>,
+    painter: &mut Painter<'_, Scene>,
     terminal: &Terminal,
     pane_state: &TerminalPaneState,
     is_active: bool,
     size: Size,
     offset_x: f64,
     offset_y: f64,
+    fcx: &mut xilem::masonry::parley::FontContext,
+    lcx: &mut xilem::masonry::parley::LayoutContext<xilem::masonry::core::BrushIndex>,
 ) {
     // Background for this pane
     let rect = Rect::new(offset_x, offset_y, offset_x + size.width, offset_y + size.height);
@@ -151,7 +156,26 @@ pub fn render_terminal_with_offset(
             painter.fill(&hl_rect, colors::SURFACE0).draw();
         }
 
-        // Render cells
+        // Build text string for this row
+        let mut row_text = String::with_capacity(cols);
+
+        for col_idx in 0..cols {
+            let col = Column(col_idx);
+            let cell = &row[col];
+
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                // Add space placeholder for wide char
+                row_text.push(' ');
+                continue;
+            }
+
+            let ch = if cell.c == '\0' { ' ' } else { cell.c };
+            row_text.push(ch);
+        }
+
+        // Draw background cells that have non-default colors
         for col_idx in 0..cols {
             let col = Column(col_idx);
             let cell = &row[col];
@@ -162,56 +186,57 @@ pub fn render_terminal_with_offset(
                 continue;
             }
 
-            let ch = cell.c;
-            let x = offset_x + col_idx as f64 * cell_w;
-
-            let fg_color = term_color_to_peniko(cell.fg);
-            let bg_color = term_color_to_peniko(cell.bg);
-
-            // Draw background if not default
             if cell.bg != TermColor::Named(NamedColor::Background) {
+                let x = offset_x + col_idx as f64 * cell_w;
+                let bg_color = term_color_to_peniko(cell.bg);
                 let cell_rect = Rect::new(x, y, x + cell_w, y + cell_h);
                 painter.fill(&cell_rect, bg_color).draw();
             }
 
-            // Skip empty cells
-            if ch == '\0' || ch == ' ' {
-                continue;
-            }
-
-            // Character block (use smaller filled rect to represent the glyph)
-            let char_margin = 1.5;
-            let char_rect = Rect::new(
-                x + char_margin,
-                y + char_margin,
-                x + cell_w - char_margin,
-                y + cell_h - char_margin,
-            );
-            painter.fill(&char_rect, fg_color).draw();
-
-            // Bold left indicator
+            // Bold indicator
             if cell.flags.contains(Flags::BOLD) || cell.flags.contains(Flags::DIM_BOLD) {
+                let x = offset_x + col_idx as f64 * cell_w;
                 let bold_rect = Rect::new(x, y, x + 2.0, y + cell_h);
                 painter.fill(&bold_rect, Color::from_rgba8(0xff, 0xff, 0xff, 0x20)).draw();
             }
 
             // Underline
             if cell.flags.contains(Flags::UNDERLINE) {
+                let x = offset_x + col_idx as f64 * cell_w;
+                let fg_color = term_color_to_peniko(cell.fg);
                 let ul_rect = Rect::new(x, y + cell_h - 2.0, x + cell_w, y + cell_h);
                 painter.fill(&ul_rect, fg_color).draw();
             }
 
             // Strikethrough
             if cell.flags.contains(Flags::STRIKEOUT) {
+                let x = offset_x + col_idx as f64 * cell_w;
+                let fg_color = term_color_to_peniko(cell.fg);
                 let strike_rect = Rect::new(x, y + cell_h / 2.0 - 1.0, x + cell_w, y + cell_h / 2.0 + 1.0);
                 painter.fill(&strike_rect, fg_color).draw();
             }
+        }
 
-            // Inverse (swap fg/bg)
-            if cell.flags.contains(Flags::INVERSE) {
-                let inv_rect = Rect::new(x, y, x + cell_w, y + cell_h);
-                painter.fill(&inv_rect, fg_color).draw();
-            }
+        // Render text for this row using parley
+        if !row_text.is_empty() {
+            let font_size = (cell_h * 0.75) as f32;
+            let mut builder = lcx.ranged_builder(fcx, &row_text, 1.0, true);
+            builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
+                FontFamilyName::Generic(GenericFamily::Monospace),
+            )));
+            builder.push_default(StyleProperty::FontSize(font_size));
+            
+            let mut layout = builder.build(&row_text);
+            layout.break_all_lines(None);
+            layout.align(None, Alignment::Start, AlignmentOptions::default());
+            
+            // Position the text - calculate baseline position
+            let text_y_base = y + cell_h * 0.15;
+            let transform = Affine::translate((offset_x, text_y_base));
+            
+            // Use default text color
+            let brushes = &[Brush::Solid(colors::TEXT)];
+            render_text(painter, transform, &layout, brushes, true);
         }
     }
 
@@ -240,13 +265,15 @@ pub fn render_terminal_with_offset(
 
 /// Render a terminal onto a canvas (without offset - fills the entire canvas)
 pub fn render_terminal(
-    painter: &mut Painter<'_, xilem::masonry::imaging::record::Scene>,
+    painter: &mut Painter<'_, Scene>,
     terminal: &Terminal,
     pane_state: &TerminalPaneState,
     is_active: bool,
     size: Size,
+    fcx: &mut xilem::masonry::parley::FontContext,
+    lcx: &mut xilem::masonry::parley::LayoutContext<xilem::masonry::core::BrushIndex>,
 ) {
-    render_terminal_with_offset(painter, terminal, pane_state, is_active, size, 0.0, 0.0)
+    render_terminal_with_offset(painter, terminal, pane_state, is_active, size, 0.0, 0.0, fcx, lcx)
 }
 
 /// Get the focused pane index

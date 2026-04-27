@@ -20,15 +20,32 @@ fn tab_bar() -> impl WidgetView<App> + use<> {
     flex_row((
         // Left side: current pane indicator (dynamic canvas)
         sized_box(
-            canvas(move |state: &mut App, _ctx, scene, size| {
+            canvas(move |state: &mut App, ctx, scene, size| {
                 let mut painter = xilem::masonry::imaging::Painter::new(scene);
                 let rect = size.to_rect();
                 painter.fill(&rect, bg_color).draw();
                 
-                // Draw simple pane indicator block
+                // Draw pane indicator text using parley
                 let text = format!("Pane {}/{}", state.active_pane_index + 1, state.panes.len());
-                let text_rect = xilem::masonry::kurbo::Rect::new(8.0, 6.0, 8.0 + (text.len() as f64 * 7.0), 22.0);
-                painter.fill(&text_rect, Color::from_rgba8(0xc6, 0xd0, 0xf5, 0xff)).draw();
+                let (fcx, lcx) = ctx.text_contexts();
+                
+                let mut builder = lcx.ranged_builder(fcx, &text, 1.0, true);
+                builder.push_default(xilem::masonry::parley::style::FontFamily::Single(
+                    xilem::masonry::parley::style::FontFamilyName::Generic(
+                        xilem::masonry::parley::style::GenericFamily::Monospace,
+                    ),
+                ));
+                builder.push_default(xilem::masonry::parley::style::StyleProperty::FontSize(16.0));
+                
+                let mut layout = builder.build(&text);
+                layout.break_all_lines(None);
+                layout.align(None, xilem::masonry::parley::Alignment::Start, 
+                    xilem::masonry::parley::AlignmentOptions::default());
+                
+                let transform = xilem::masonry::kurbo::Affine::translate((8.0, 6.0));
+                xilem::masonry::core::render_text(&mut painter, transform, &layout, &[xilem::masonry::peniko::Brush::Solid(
+                    Color::from_rgba8(0xc6, 0xd0, 0xf5, 0xff)
+                )], true);
             }).alt_text("Pane indicator")
         ).fixed_width(Length::px(150.0)).fixed_height(Length::px(28.0)),
         
@@ -60,23 +77,29 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
     let active_idx = data.active_pane_index;
     
     // Create a terminal canvas that renders ALL panes in their layout positions
-    let terminal_area = canvas(move |state: &mut App, _ctx, scene, window_size| {
+    // The canvas receives the available size after flex layout subtracts tab_bar and status_bar
+    let terminal_area = canvas(move |state: &mut App, ctx, scene, available_size| {
         let mut painter = xilem::masonry::imaging::Painter::new(scene);
         
-        // Background
-        let bg_rect = window_size.to_rect();
+        // Get text contexts for rendering terminal text
+        let (fcx, lcx) = ctx.text_contexts();
+        
+        // Background - fill the entire available space
+        let bg_rect = available_size.to_rect();
         painter.fill(&bg_rect, Color::from_rgba8(0x1e, 0x1e, 0x2e, 0xff)).draw(); // Catppuccin Base
         
         // Render all panes in their layout positions
+        // available_size is already the correct size (window - tab_bar - status_bar)
         for (pane_idx, pane) in state.panes.iter().enumerate() {
             let pane_state = &state.pane_states[pane_idx];
             let layout = &pane.layout;
             
-            // Calculate absolute position and size
-            let x = layout.x * window_size.width;
-            let y = layout.y * window_size.height;
-            let w = layout.width * window_size.width;
-            let h = layout.height * window_size.height;
+            // Calculate absolute position and size within the terminal area
+            // layout uses normalized coordinates (0.0-1.0)
+            let x = layout.x * available_size.width;
+            let y = layout.y * available_size.height;
+            let w = layout.width * available_size.width;
+            let h = layout.height * available_size.height;
             
             let pane_size = xilem::masonry::kurbo::Size::new(w, h);
             
@@ -89,25 +112,27 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
                 pane_size,
                 x,
                 y,
+                fcx,
+                lcx,
             );
         }
     }).alt_text("Terminal multiplexer output");
 
     // cmux-style layout:
     // +----------------------------------+
-    // | Tab Bar (Pane info + buttons)    |
+    // | Tab Bar (Pane info + buttons)    |  <- 固定高度 28px
     // +----------------------------------+
     // |                                  |
     // |                                  |
-    // |    Terminal Area (full size)     |
+    // |    Terminal Area (flex 填充)     |  <- 自动填充剩余空间
     // |                                  |
     // |                                  |
     // +----------------------------------+
-    // | Status Bar (shortcuts)           |
+    // | Status Bar (shortcuts)           |  <- 固定高度
     // +----------------------------------+
     flex_col((
         tab_bar(),
-        terminal_area,
+        terminal_area,  // canvas会自动填充flex中的可用空间
         status_bar(),
     ))
 }

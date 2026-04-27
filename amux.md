@@ -255,3 +255,89 @@ cargo build --release
 ```bash
 git tag -a v0.0.1 -m "初始版本：cmux风格布局与PowerShell终端"
 ```
+
+---
+
+### v0.0.2 - 真实文字渲染 (2026-04-27)
+
+#### 实现概述
+修复了两个关键问题：终端窗口高度计算错误和文字显示为彩色块的问题。成功实现了使用parley进行文本布局、render_text进行真实字形渲染。
+
+#### 核心变更
+
+**1. 修复终端窗口高度计算**
+- 问题：canvas接收的尺寸参数不正确，导致终端未铺满可用空间
+- 解决：使用flex布局自动分配的`available_size`参数
+- 布局结构：tab_bar (28px固定) + terminal_area (flex自动填充) + status_bar (固定)
+- canvas现在正确接收减去标签行和状态栏后的可用空间
+
+**2. 实现真实文字渲染**
+- 问题：字符渲染为小的彩色矩形（`char_margin = 1.5`的填充方块）
+- 解决方案：
+  - 使用`parley::ranged_builder`为每行终端文本构建文本布局
+  - 设置monospace字体（GenericFamily::Monospace）
+  - 使用`xilem::masonry::core::render_text()`渲染真实字形
+  - 通过`Affine::translate()`正确定位每行文本的基线位置
+
+**关键技术实现** (`terminal_render.rs`):
+```rust
+// 为每行构建parley文本布局
+let mut builder = lcx.ranged_builder(fcx, &row_text, 1.0, true);
+builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
+    FontFamilyName::Generic(GenericFamily::Monospace),
+)));
+builder.push_default(StyleProperty::FontSize(font_size));
+
+let mut layout = builder.build(&row_text);
+layout.break_all_lines(None);
+layout.align(None, Alignment::Start, AlignmentOptions::default());
+
+// 渲染真实字形
+let transform = Affine::translate((offset_x, text_y_base));
+let brushes = &[Brush::Solid(colors::TEXT)];
+render_text(painter, transform, &layout, brushes, true);
+```
+
+**3. 标签行文字渲染**
+- 同样使用parley渲染"Pane X/Y"指示器
+- 替代了原来的彩色矩形方案
+
+**4. 架构调整**
+- 更新`render_terminal_with_offset`函数签名，添加`fcx`和`lcx`参数
+- 从canvas回调中获取`ctx.text_contexts()`传递到渲染层
+- 正确集成Masonry的BrushIndex机制
+
+#### 技术细节
+
+**渲染流程**:
+1. 从canvas回调获取`MutateCtx`，调用`text_contexts()`获取FontContext和LayoutContext
+2. 对每行终端网格单元：
+   - 收集字符到`row_text`字符串
+   - 绘制非默认背景色的单元格
+   - 绘制装饰效果（下划线、删除线、粗体指示）
+   - 使用parley构建文本布局
+   - 调用render_text渲染真实字形
+
+**依赖使用**:
+- parley 0.8 - 文本布局和字形排列
+- Masonry imaging - canvas渲染器
+- Vello - 底层GPU渲染（通过Masonry封装）
+
+#### 已知限制
+- 当前所有文字使用统一前景色（Catppuccin Text #c6d0f5）
+- 每字符颜色支持需要更复杂的BrushIndex管理
+- 键盘输入尚未实现
+- 字体使用系统默认monospace，未加载自定义字体
+
+#### 下一步计划
+- [ ] 实现每字符颜色渲染（使用BrushIndex）
+- [ ] 实现键盘输入处理（Ctrl+B前缀模式）
+- [ ] 鼠标点击选择窗格
+- [ ] 加载自定义monospace字体
+- [ ] 文本选择和复制粘贴
+- [ ] 滚动缓冲区导航
+
+#### Git标签
+```bash
+git tag -a v0.0.2 -m "实现真实文字渲染：使用parley布局，render_text渲染字形"
+```
