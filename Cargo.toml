@@ -1,0 +1,24 @@
+[package]
+name = "amux"
+version = "0.1.0"
+edition = "2021"
+description = "A cross-platform terminal multiplexer combining Alacritty terminal backend with Xilem/Vello GPU-accelerated rendering"
+
+[dependencies]
+# Core terminal parsing - ANSI parsing, PTY state management, scroll buffer
+alacritty_terminal = "0.24.0"
+# UI framework - declarative UI, layout, cross-platform window via winit, GPU rendering
+xilem = { git = "https://github.com/linebender/xilem" }
+# PTY handling - cross-platform pseudo-terminal management
+portable-pty = "0.8"
+# Logging
+log = "0.4"
+env_logger = "0.11"
+# Accessibility (used by custom widgets)
+accesskit = "0.24"
+# Text rendering
+parley = "0.8"
+fontique = "0.8"
+# Color handling
+peniko = "0.6"
+skrifa = "0.40"
