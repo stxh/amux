@@ -423,3 +423,69 @@ fn measure(...) -> f64 {
 ```bash
 git tag -a v0.0.3 -m "修复终端尺寸：canvas高度从100px增加到700px，文字正常可识别"
 ```
+
+### v0.0.4 - 修复VTE解析，终端文本正常显示 (2026-04-28)
+
+#### 实现概述
+修复PTY输出未正确解析为终端网格内容的根本问题。添加VTE解析器处理ANSI转义序列，使终端文本正确显示。
+
+#### 核心修复
+
+**1. 添加VTE解析器（关键修复）**
+- 问题：PTY原始字节直接调用`term.input()`，ANSI转义序列被作为普通字符存储到网格中
+- 根因：绕过了alacritty_terminal的VTE解析器，`\x1b[H`等转义序列被当作字符`[`、`H`等存储
+- 解决方案：使用`vte::ansi::Processor`解析PTY字节，正确调用terminal的input()/execute()方法
+
+```rust
+// 之前（错误）：直接调用input，ANSI序列被当作字符存储
+for byte in &buf[..bytes_read] {
+    term.input(*byte as char);
+}
+
+// 之后（正确）：通过VTE解析器处理
+let mut parser: Processor<StdSyncHandler> = Processor::new();
+for byte in &buf[..bytes_read] {
+    parser.advance(&mut *term, *byte);
+}
+```
+
+**2. 控制字符过滤**
+- 渲染时过滤控制字符，将其替换为空格
+- `\0` → 空格，其他控制字符（除tab外）→ 空格
+
+**3. 移除当前行背景高亮**
+- 移除错误的光标行整行高亮代码
+
+**4. 修复光标位置计算**
+- 使用`cursor.line`和`cursor.column`获取光标位置
+- 减去display_offset得到相对屏幕位置
+- 只在光标在可见区域内时绘制
+
+**5. 定期重绘机制**
+- 添加tokio定时任务每100ms触发视图重建
+- 解决终端异步更新不触发Xilem重绘的问题
+
+**6. 调试信息增强**
+- 标签栏显示：窗格数|终端尺寸|总行数|偏移|光标位置|首行/末行内容
+
+#### 已知限制（待修复）
+
+- **光标位置不精确**：需要考虑更多边界情况
+- **无键盘回显**：Canvas不支持键盘事件，需要自定义Masonry Widget
+- **全局热键不工作**：Ctrl+B等prefix键无法捕获
+- **分窗格后字符变小**：字体大小基于可用空间计算，应使用固定大小
+- **字符大小应固定**：终端尺寸变化时只改变可视区域，不改变字符尺寸
+
+#### 文件变更
+
+- `Cargo.toml`: 版本0.0.4，添加tokio依赖
+- `src/terminal.rs`: 添加VTE Processor解析PTY输出
+- `src/terminal_render.rs`: 控制字符过滤、光标位置修复、调试日志
+- `src/main.rs`: 定期重绘任务、调试信息增强
+- `src/app.rs`: 添加redraw_counter字段
+- `src/keyboard.rs`: 重构键盘处理函数（暂未连接）
+
+#### Git标签
+```bash
+git tag -a v0.0.4 -m "添加VTE解析器：终端文本正常显示，修复ANSI转义序列处理"
+```

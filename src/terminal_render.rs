@@ -11,7 +11,7 @@ use xilem::masonry::core::render_text;
 use xilem::masonry::imaging::{Painter, record::Scene};
 use xilem::masonry::kurbo::{Affine, Rect, Size, Stroke};
 use xilem::masonry::parley::style::{FontFamily, FontFamilyName, GenericFamily, StyleProperty};
-use xilem::masonry::parley::{Alignment, AlignmentOptions, Layout};
+use xilem::masonry::parley::{Alignment, AlignmentOptions};
 use xilem::masonry::peniko::{Brush, Color};
 
 use crate::terminal::Terminal;
@@ -97,6 +97,8 @@ pub struct TerminalPaneState {
     pub scroll_offset: usize,
     /// Whether this pane has keyboard focus
     pub is_focused: bool,
+    /// Whether this pane state has focus for keyboard input
+    pub has_focus: bool,
 }
 
 impl TerminalPaneState {
@@ -104,6 +106,7 @@ impl TerminalPaneState {
         Self {
             scroll_offset: 0,
             is_focused: false,
+            has_focus: false,
         }
     }
 }
@@ -133,9 +136,32 @@ pub fn render_terminal_with_offset(
     let total_lines = grid.total_lines();
     let screen_lines = grid.screen_lines();
 
+    // Debug: Check first few cells of the grid
+    if pane_state.scroll_offset == 0 && display_offset == 0 {
+        // Log first row content to a file
+        let log_path = format!("C:\\Users\\StXh\\amux_render_debug_{}.txt", std::process::id());
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            use std::io::Write;
+            let first_row: String = (0..cols.min(30)).map(|c| {
+                let cell = &grid[Line(0)][Column(c)];
+                if cell.c.is_control() { '.' } else { cell.c }
+            }).collect();
+            let last_row: String = (0..cols.min(30)).map(|c| {
+                let cell = &grid[Line(23)][Column(c)];
+                if cell.c.is_control() { '.' } else { cell.c }
+            }).collect();
+            let _ = writeln!(f, "Render: cols={}, total_lines={}, screen_lines={}, disp_offset={}", cols, total_lines, screen_lines, display_offset);
+            let _ = writeln!(f, "Row 0: '{}'", first_row);
+            let _ = writeln!(f, "Row 23: '{}'", last_row);
+        }
+    }
+
+    // Calculate cursor position relative to visible screen
+    // cursor is already a Point with line and column fields
     let cursor = terminal.cursor();
     let cursor_col = cursor.column.0;
-    let cursor_line = cursor.line.0;
+    let cursor_line_abs = cursor.line.0;
+    let cursor_line_relative = cursor_line_abs - display_offset as i32;
 
     // Calculate cell dimensions based on actual screen lines
     let cell_w = size.width / cols as f64;
@@ -151,13 +177,7 @@ pub fn render_terminal_with_offset(
         let line = Line(actual_row as i32);
         let row = &grid[line];
 
-        // Cursor line highlight
-        if is_active && row_idx as i32 == cursor_line {
-            let hl_rect = Rect::new(offset_x, y, offset_x + size.width, y + cell_h);
-            painter.fill(&hl_rect, colors::SURFACE0).draw();
-        }
-
-        // Build text string for this row
+        // Build text string for this row, filtering control characters
         let mut row_text = String::with_capacity(cols);
 
         for col_idx in 0..cols {
@@ -172,7 +192,14 @@ pub fn render_terminal_with_offset(
                 continue;
             }
 
-            let ch = if cell.c == '\0' { ' ' } else { cell.c };
+            // Filter control characters - only display printable chars
+            // alacritty's VTE parser doesn't store control chars in grid,
+            // but we may see \0 from empty cells
+            let ch = match cell.c {
+                '\0' => ' ',  // Null -> space
+                c if c.is_control() && c != '\t' => ' ',  // Control chars (except tab) -> space
+                c => c,
+            };
             row_text.push(ch);
         }
 
@@ -242,9 +269,9 @@ pub fn render_terminal_with_offset(
         }
     }
 
-    // Draw cursor block
-    if is_active && cursor_line >= 0 && (cursor_line as usize) < screen_lines && cursor_col < cols as usize {
-        let cursor_y = offset_y + cursor_line as f64 * cell_h;
+    // Draw cursor block - only if visible on current screen
+    if is_active && cursor_line_relative >= 0 && cursor_line_relative < screen_lines as i32 && cursor_col < cols as usize {
+        let cursor_y = offset_y + cursor_line_relative as f64 * cell_h;
         let cursor_x = offset_x + cursor_col as f64 * cell_w;
         let cursor_rect = Rect::new(cursor_x, cursor_y, cursor_x + cell_w, cursor_y + cell_h);
         painter.fill(&cursor_rect, colors::ROSEWATER).draw();

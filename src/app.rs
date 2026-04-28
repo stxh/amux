@@ -18,6 +18,8 @@ pub struct App {
     pub status_message: String,
     /// Keep running flag
     pub running: bool,
+    /// Redraw counter - incremented to force view rebuilds
+    pub redraw_counter: u64,
 }
 
 impl AppState for App {
@@ -55,6 +57,7 @@ impl App {
             prefix_indicator: "".to_string(),
             status_message: "Ready - Press + to split vertically, - to split horizontally".to_string(),
             running: true,
+            redraw_counter: 0,
         }
     }
 
@@ -206,5 +209,12 @@ impl App {
                 let _ = pane.terminal.write_input(key.as_bytes());
             }
         }
+    }
+
+    /// Handle a raw keyboard event with modifier information
+    /// Returns true if the event was handled
+    pub fn handle_raw_key_event(&mut self, key: &str, ctrl: bool, alt: bool) -> bool {
+        // Use the keyboard module to handle the event
+        crate::keyboard::handle_key_input(self, key, ctrl, alt)
     }
 }

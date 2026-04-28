@@ -1,12 +1,25 @@
-/// Keyboard event handling for terminal multiplexer
-/// Routes keyboard input to the active terminal's PTY
+/// Terminal keyboard input handler
+///
+/// Uses a transparent TextInput widget to capture keyboard events
+/// and forwards them to the active terminal.
 
 use crate::app::App;
-use crate::pane::LayoutMode;
 use crate::terminal::Terminal;
 
-/// Handle a keyboard character event
-/// Returns true if the event was handled (consumed)
+/// Handle keyboard input from a transparent TextInput widget.
+/// The `text` parameter contains the newly typed characters.
+/// Returns true if the input was handled.
+pub fn handle_text_input(app: &mut App, text: &str) -> bool {
+    if let Some(pane) = app.active_pane_mut() {
+        let _ = pane.terminal.write_input(text.as_bytes());
+        true
+    } else {
+        false
+    }
+}
+
+/// Handle a keyboard character event with modifier information
+/// This is called from the main.rs on_key_event handler
 pub fn handle_key_input(app: &mut App, key: &str, ctrl: bool, alt: bool) -> bool {
     // Check for tmux-like prefix key: Ctrl+B
     if ctrl && key == "b" {
@@ -22,22 +35,21 @@ pub fn handle_key_input(app: &mut App, key: &str, ctrl: bool, alt: bool) -> bool
     // If in prefix mode, handle prefix commands
     if app.prefix_mode {
         app.prefix_mode = false; // Exit prefix mode after handling
-        
+
         match key {
             "c" => {
-                app.split_pane(LayoutMode::Vertical);
+                app.split_pane(crate::pane::LayoutMode::Vertical);
                 return true;
             }
             "%" => {
-                app.split_pane(LayoutMode::Horizontal);
+                app.split_pane(crate::pane::LayoutMode::Horizontal);
                 return true;
             }
             "\"" => {
-                app.split_pane(LayoutMode::Vertical);
+                app.split_pane(crate::pane::LayoutMode::Vertical);
                 return true;
             }
             "d" => {
-                // Detach (not implemented yet, just show message)
                 app.status_message = "Detach not implemented".to_string();
                 return true;
             }
@@ -54,7 +66,6 @@ pub fn handle_key_input(app: &mut App, key: &str, ctrl: bool, alt: bool) -> bool
                 return true;
             }
             "z" => {
-                // Suspend (not implemented)
                 app.status_message = "Suspend not implemented".to_string();
                 return true;
             }
@@ -83,7 +94,7 @@ fn send_to_terminal(term: &mut Terminal, key: &str, ctrl: bool, alt: bool) {
             let _ = term.write_input(&[ctrl_char as u8]);
             return;
         }
-        
+
         match key {
             "space" => { let _ = term.write_input(&[0x00]); },
             "2" => { let _ = term.write_input(&[0x00]); }, // Ctrl+Space = Ctrl+@
@@ -118,7 +129,7 @@ fn send_to_terminal(term: &mut Terminal, key: &str, ctrl: bool, alt: bool) {
             "enter" | "return" => {
                 let _ = term.write_input(b"\r");
             }
-            "backspace" | "delete" => {
+            "backspace" => {
                 let _ = term.write_input(b"\x7f");
             }
             "escape" => {
