@@ -1,6 +1,7 @@
 /// Terminal canvas rendering - renders terminal grid onto a canvas surface
 ///
 /// This module provides functions to render terminal grids using Xilem's canvas pattern.
+/// Supports per-character foreground/background coloring using parley's ranged_builder.
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
@@ -15,21 +16,16 @@ use xilem::masonry::parley::{Alignment, AlignmentOptions};
 use xilem::masonry::peniko::{Brush, Color};
 
 use crate::terminal::Terminal;
-use crate::app::App;
 
 /// Catppuccin Mocha color scheme
 mod colors {
     use super::Color;
     pub const CRUST:     Color = Color::from_rgba8(0x11, 0x11, 0x1b, 0xff);
-    pub const BASE:      Color = Color::from_rgba8(0x1e, 0x1e, 0x2e, 0xff);
     pub const SURFACE0:  Color = Color::from_rgba8(0x31, 0x32, 0x44, 0xff);
     pub const SURFACE1:  Color = Color::from_rgba8(0x45, 0x47, 0x5a, 0xff);
     pub const TEXT:      Color = Color::from_rgba8(0xc6, 0xd0, 0xf5, 0xff);
     pub const BLUE:      Color = Color::from_rgba8(0x89, 0xb4, 0xfa, 0xff);
     pub const ROSEWATER: Color = Color::from_rgba8(0xf5, 0xe0, 0xdc, 0xff);
-    pub const RED:       Color = Color::from_rgba8(0xf3, 0x8b, 0xa8, 0xff);
-    pub const GREEN:     Color = Color::from_rgba8(0xa6, 0xe3, 0xa1, 0xff);
-    pub const YELLOW:    Color = Color::from_rgba8(0xf9, 0xe2, 0xaf, 0xff);
 }
 
 /// Convert alacritty TermColor to peniko Color
@@ -90,31 +86,38 @@ fn term_color_to_peniko(color: TermColor) -> Color {
     Color::from_rgba8(rgb.r, rgb.g, rgb.b, 0xff)
 }
 
+/// Check if a color is the default foreground
+fn is_default_fg(color: TermColor) -> bool {
+    matches!(color, TermColor::Named(NamedColor::Foreground))
+}
+
 /// Terminal pane state (maintained separately from the terminal itself)
 #[derive(Clone)]
 pub struct TerminalPaneState {
     /// Scroll offset from bottom of history
     pub scroll_offset: usize,
-    /// Whether this pane has keyboard focus
-    pub is_focused: bool,
-    /// Whether this pane state has focus for keyboard input
-    pub has_focus: bool,
 }
 
 impl TerminalPaneState {
     pub fn new() -> Self {
         Self {
             scroll_offset: 0,
-            is_focused: false,
-            has_focus: false,
         }
     }
+}
+
+/// A color segment within a row — contiguous characters sharing the same fg color
+struct ColorSegment {
+    start_byte: usize,
+    end_byte: usize,
+    color: Color,
 }
 
 /// Render a terminal onto a canvas with an offset
 ///
 /// This function renders a terminal at a specific position within the canvas,
 /// allowing multiple panes to be rendered in their layout positions.
+/// Now supports per-character foreground coloring via parley's ranged_builder.
 pub fn render_terminal_with_offset(
     painter: &mut Painter<'_, Scene>,
     terminal: &Terminal,
@@ -136,49 +139,38 @@ pub fn render_terminal_with_offset(
     let total_lines = grid.total_lines();
     let screen_lines = grid.screen_lines();
 
-    // Debug: Check first few cells of the grid
-    if pane_state.scroll_offset == 0 && display_offset == 0 {
-        // Log first row content to a file
-        let log_path = format!("C:\\Users\\StXh\\amux_render_debug_{}.txt", std::process::id());
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-            use std::io::Write;
-            let first_row: String = (0..cols.min(30)).map(|c| {
-                let cell = &grid[Line(0)][Column(c)];
-                if cell.c.is_control() { '.' } else { cell.c }
-            }).collect();
-            let last_row: String = (0..cols.min(30)).map(|c| {
-                let cell = &grid[Line(23)][Column(c)];
-                if cell.c.is_control() { '.' } else { cell.c }
-            }).collect();
-            let _ = writeln!(f, "Render: cols={}, total_lines={}, screen_lines={}, disp_offset={}", cols, total_lines, screen_lines, display_offset);
-            let _ = writeln!(f, "Row 0: '{}'", first_row);
-            let _ = writeln!(f, "Row 23: '{}'", last_row);
-        }
-    }
-
-    // Calculate cursor position relative to visible screen
-    // cursor is already a Point with line and column fields
     let cursor = terminal.cursor();
     let cursor_col = cursor.column.0;
     let cursor_line_abs = cursor.line.0;
-    let cursor_line_relative = cursor_line_abs - display_offset as i32;
 
-    // Calculate cell dimensions based on actual screen lines
-    let cell_w = size.width / cols as f64;
-    let cell_h = size.height / screen_lines as f64;
+    // Fixed cell dimensions
+    const FONT_SIZE: f32 = 18.0;
+    const CELL_WIDTH: f64 = 10.8;
+    const CELL_HEIGHT: f64 = 25.2;
 
-    for row_idx in 0..screen_lines {
-        let actual_row = row_idx + display_offset;
-        if actual_row >= total_lines {
-            break;
+    let cell_w = CELL_WIDTH;
+    let cell_h = CELL_HEIGHT;
+
+    // Calculate how many rows we can actually display
+    let max_displayable_rows = (size.height / cell_h).floor() as usize;
+    let display_lines = screen_lines.min(max_displayable_rows);
+
+    // Render visible rows
+    for row_idx in 0..display_lines {
+        let y = offset_y + row_idx as f64 * cell_h;
+        let line_num = row_idx as i32 - display_offset as i32;
+        let line = Line(line_num);
+
+        // Skip lines that are out of bounds
+        if line_num < grid.topmost_line().0 {
+            continue;
         }
 
-        let y = offset_y + row_idx as f64 * cell_h;
-        let line = Line(actual_row as i32);
         let row = &grid[line];
 
-        // Build text string for this row, filtering control characters
+        // Build text string and collect per-character color info
         let mut row_text = String::with_capacity(cols);
+        let mut char_colors: Vec<Color> = Vec::with_capacity(cols);
 
         for col_idx in 0..cols {
             let col = Column(col_idx);
@@ -187,23 +179,28 @@ pub fn render_terminal_with_offset(
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
                 || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
             {
-                // Add space placeholder for wide char
                 row_text.push(' ');
+                char_colors.push(colors::TEXT);
                 continue;
             }
 
-            // Filter control characters - only display printable chars
-            // alacritty's VTE parser doesn't store control chars in grid,
-            // but we may see \0 from empty cells
             let ch = match cell.c {
-                '\0' => ' ',  // Null -> space
-                c if c.is_control() && c != '\t' => ' ',  // Control chars (except tab) -> space
+                '\0' => ' ',
+                c if c.is_control() && c != '\t' => ' ',
                 c => c,
             };
             row_text.push(ch);
+
+            // Determine foreground color for this character
+            let fg_color = if is_default_fg(cell.fg) {
+                colors::TEXT
+            } else {
+                term_color_to_peniko(cell.fg)
+            };
+            char_colors.push(fg_color);
         }
 
-        // Draw background cells that have non-default colors
+        // Draw background cells with non-default colors
         for col_idx in 0..cols {
             let col = Column(col_idx);
             let cell = &row[col];
@@ -219,13 +216,6 @@ pub fn render_terminal_with_offset(
                 let bg_color = term_color_to_peniko(cell.bg);
                 let cell_rect = Rect::new(x, y, x + cell_w, y + cell_h);
                 painter.fill(&cell_rect, bg_color).draw();
-            }
-
-            // Bold indicator
-            if cell.flags.contains(Flags::BOLD) || cell.flags.contains(Flags::DIM_BOLD) {
-                let x = offset_x + col_idx as f64 * cell_w;
-                let bold_rect = Rect::new(x, y, x + 2.0, y + cell_h);
-                painter.fill(&bold_rect, Color::from_rgba8(0xff, 0xff, 0xff, 0x20)).draw();
             }
 
             // Underline
@@ -245,33 +235,52 @@ pub fn render_terminal_with_offset(
             }
         }
 
-        // Render text for this row using parley
+        // Render text with per-character coloring using ranged_builder
         if !row_text.is_empty() {
-            // Use cell_h directly as font size - should give correct sizing
-            let font_size = cell_h as f32 * 0.7;
             let mut builder = lcx.ranged_builder(fcx, &row_text, 1.0, true);
             builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
                 FontFamilyName::Generic(GenericFamily::Monospace),
             )));
-            builder.push_default(StyleProperty::FontSize(font_size));
-            
+            builder.push_default(StyleProperty::FontSize(FONT_SIZE));
+
+            // Build color segments: merge consecutive chars with same color
+            let segments = build_color_segments(&row_text, &char_colors);
+
+            // Collect brushes and push ranges
+            let mut brushes: Vec<Brush> = Vec::new();
+            // BrushIndex 0 = default text color
+            brushes.push(Brush::Solid(colors::TEXT));
+
+            for seg in &segments {
+                if seg.color == colors::TEXT {
+                    // Use default brush (index 0)
+                    continue;
+                }
+                // Add this brush and push a range for it
+                let brush_idx = brushes.len();
+                brushes.push(Brush::Solid(seg.color));
+                builder.push(
+                    StyleProperty::Brush(xilem::masonry::core::BrushIndex(brush_idx)),
+                    seg.start_byte..seg.end_byte,
+                );
+            }
+
             let mut layout = builder.build(&row_text);
             layout.break_all_lines(None);
             layout.align(None, Alignment::Start, AlignmentOptions::default());
-            
-            // Position baseline at about 78% of cell from top
+
+            // Position baseline
             let text_y_base = y + cell_h * 0.78;
             let transform = Affine::translate((offset_x, text_y_base));
-            
-            // Use default text color
-            let brushes = &[Brush::Solid(colors::TEXT)];
-            render_text(painter, transform, &layout, brushes, true);
+
+            render_text(painter, transform, &layout, &brushes, true);
         }
     }
 
-    // Draw cursor block - only if visible on current screen
-    if is_active && cursor_line_relative >= 0 && cursor_line_relative < screen_lines as i32 && cursor_col < cols as usize {
-        let cursor_y = offset_y + cursor_line_relative as f64 * cell_h;
+    // Draw cursor block
+    let cursor_screen_row = cursor_line_abs + display_offset as i32;
+    if is_active && cursor_screen_row >= 0 && (cursor_screen_row as usize) < display_lines && cursor_col < cols as usize {
+        let cursor_y = offset_y + cursor_screen_row as f64 * cell_h;
         let cursor_x = offset_x + cursor_col as f64 * cell_w;
         let cursor_rect = Rect::new(cursor_x, cursor_y, cursor_x + cell_w, cursor_y + cell_h);
         painter.fill(&cursor_rect, colors::ROSEWATER).draw();
@@ -282,7 +291,7 @@ pub fn render_terminal_with_offset(
     let border = Stroke::new(2.0);
     painter.stroke(&rect, &border, border_color).draw();
 
-    // Scroll indicator (show if scrolled into history)
+    // Scroll indicator
     if pane_state.scroll_offset > 0 {
         let scroll_pct = pane_state.scroll_offset as f64 / total_lines as f64;
         let indicator_h = (size.height * 0.1).max(20.0);
@@ -292,20 +301,45 @@ pub fn render_terminal_with_offset(
     }
 }
 
-/// Render a terminal onto a canvas (without offset - fills the entire canvas)
-pub fn render_terminal(
-    painter: &mut Painter<'_, Scene>,
-    terminal: &Terminal,
-    pane_state: &TerminalPaneState,
-    is_active: bool,
-    size: Size,
-    fcx: &mut xilem::masonry::parley::FontContext,
-    lcx: &mut xilem::masonry::parley::LayoutContext<xilem::masonry::core::BrushIndex>,
-) {
-    render_terminal_with_offset(painter, terminal, pane_state, is_active, size, 0.0, 0.0, fcx, lcx)
-}
+/// Build color segments by merging consecutive characters with the same foreground color.
+/// Returns byte-range segments for use with parley's ranged_builder.
+fn build_color_segments(text: &str, char_colors: &[Color]) -> Vec<ColorSegment> {
+    let mut segments = Vec::new();
+    if char_colors.is_empty() {
+        return segments;
+    }
 
-/// Get the focused pane index
-pub fn get_focused_pane(app: &App) -> Option<usize> {
-    app.panes.iter().position(|p| p.is_active)
+    let mut current_color = char_colors[0];
+    let mut start_byte = 0usize;
+    let mut char_idx = 0;
+    let mut byte_pos = 0usize;
+
+    for ch in text.chars() {
+        let ch_len = ch.len_utf8();
+
+        if char_idx < char_colors.len() && char_colors[char_idx] != current_color {
+            // End previous segment
+            segments.push(ColorSegment {
+                start_byte,
+                end_byte: byte_pos,
+                color: current_color,
+            });
+            current_color = char_colors[char_idx];
+            start_byte = byte_pos;
+        }
+
+        byte_pos += ch_len;
+        char_idx += 1;
+    }
+
+    // Final segment
+    if byte_pos > start_byte {
+        segments.push(ColorSegment {
+            start_byte,
+            end_byte: byte_pos,
+            color: current_color,
+        });
+    }
+
+    segments
 }

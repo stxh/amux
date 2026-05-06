@@ -1,14 +1,22 @@
-use crate::pane::{LayoutMode, Pane, PaneLayout};
+use crate::group::TerminalGroup;
+use crate::pane::Pane;
+use crate::pane_tree::{PaneId, SplitDirection};
 use crate::terminal::TerminalConfig;
-use crate::terminal_render::TerminalPaneState;
 use xilem::AppState;
 
 /// Global application state
 pub struct App {
-    pub panes: Vec<Pane>,
-    pub pane_states: Vec<TerminalPaneState>,
-    pub active_pane_index: usize,
-    pub next_pane_id: usize,
+    /// Terminal groups (shown in left sidebar)
+    pub groups: Vec<TerminalGroup>,
+    /// Active group index
+    pub active_group_index: usize,
+    /// Global ID counter for panes
+    pub next_pane_id: PaneId,
+    /// Global ID counter for tabs
+    pub next_tab_id: usize,
+    /// Global ID counter for groups
+    pub next_group_id: usize,
+    /// Terminal configuration
     pub terminal_config: TerminalConfig,
     /// Whether we're in prefix mode (waiting for a command after Ctrl+B)
     pub prefix_mode: bool,
@@ -20,6 +28,8 @@ pub struct App {
     pub running: bool,
     /// Redraw counter - incremented to force view rebuilds
     pub redraw_counter: u64,
+    /// Pending resizes (pane_id, cols, rows)
+    pub pending_resizes: Vec<(PaneId, u16, u16)>,
 }
 
 impl AppState for App {
@@ -31,190 +41,263 @@ impl AppState for App {
 impl App {
     pub fn new() -> Self {
         let config = TerminalConfig::default();
-        let mut first_pane = Pane::new(1, &config);
-        first_pane.set_active(true);
-        
-        // Set initial layout: single pane fills entire area
-        first_pane.layout = PaneLayout {
-            x: 0.0,
-            y: 0.0,
-            width: 1.0,
-            height: 1.0,
-        };
-        
-        // Spawn the shell for the first pane (PowerShell on Windows)
-        if let Err(e) = first_pane.terminal.spawn_shell() {
-            eprintln!("Failed to spawn shell: {}", e);
-        }
+
+        // Create first group with one tab and one pane
+        let group = TerminalGroup::new(1, 1, 1, &config);
 
         Self {
-            panes: vec![first_pane],
-            pane_states: vec![TerminalPaneState::new()],
-            active_pane_index: 0,
-            next_pane_id: 2,
+            groups: vec![group],
+            active_group_index: 0,
+            next_pane_id: 2,   // pane 1 already used
+            next_tab_id: 2,    // tab 1 already used
+            next_group_id: 2,  // group 1 already used
             terminal_config: config,
             prefix_mode: false,
-            prefix_indicator: "".to_string(),
-            status_message: "Ready - Press + to split vertically, - to split horizontally".to_string(),
+            prefix_indicator: String::new(),
+            status_message: "Ready - Ctrl+B for prefix mode".to_string(),
             running: true,
             redraw_counter: 0,
+            pending_resizes: Vec::new(),
         }
     }
 
-    /// Get a reference to the active pane
+    // ─── Group accessors ───
+
+    /// Get the active group
+    pub fn active_group(&self) -> Option<&TerminalGroup> {
+        self.groups.get(self.active_group_index)
+    }
+
+    /// Get the active group mutably
+    pub fn active_group_mut(&mut self) -> Option<&mut TerminalGroup> {
+        self.groups.get_mut(self.active_group_index)
+    }
+
+    // ─── Backward-compatible pane accessors ───
+
+    /// Get a reference to the active pane (delegates through group → tab → pane_tree)
     pub fn active_pane(&self) -> Option<&Pane> {
-        self.panes.get(self.active_pane_index)
+        self.active_group()?.active_tab()?.active_pane()
     }
 
     /// Get a mutable reference to the active pane
     pub fn active_pane_mut(&mut self) -> Option<&mut Pane> {
-        self.panes.get_mut(self.active_pane_index)
+        self.active_group_mut()?.active_tab_mut()?.active_pane_mut()
     }
 
-    /// Split the active pane horizontally or vertically
-    pub fn split_pane(&mut self, mode: LayoutMode) {
-        let Some(active) = self.active_pane() else { return };
-        let old_layout = active.layout;
+    /// Apply all pending terminal resizes
+    pub fn apply_pending_resizes(&mut self) {
+        let resizes = std::mem::take(&mut self.pending_resizes);
+        for (pane_id, cols, rows) in resizes {
+            for group in &mut self.groups {
+                for tab in &mut group.tabs {
+                    if let Some((pane, _)) = tab.pane_tree.find_mut(pane_id) {
+                        pane.resize(cols, rows);
+                    }
+                }
+            }
+        }
+    }
 
-        let new_id = self.next_pane_id;
+    // ─── Group management ───
+
+    /// Add a new group
+    pub fn add_group(&mut self) {
+        let group_id = self.next_group_id;
+        self.next_group_id += 1;
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
 
-        let mut new_pane = Pane::new(new_id, &self.terminal_config);
-        // Spawn shell for new pane
-        if let Err(e) = new_pane.terminal.spawn_shell() {
-            eprintln!("Failed to spawn shell for pane {}: {}", new_id, e);
-        }
-        new_pane.set_active(true);
+        let group = TerminalGroup::new(group_id, tab_id, pane_id, &self.terminal_config);
+        self.groups.push(group);
+        self.active_group_index = self.groups.len() - 1;
+        self.status_message = format!("Created group {} ({} groups total)", group_id, self.groups.len());
+    }
 
-        // Deactivate the old pane
-        if let Some(old) = self.panes.get_mut(self.active_pane_index) {
-            old.set_active(false);
+    /// Remove the active group (unless it's the last one)
+    pub fn remove_group(&mut self) {
+        if self.groups.len() <= 1 {
+            self.status_message = "Cannot remove the last group".to_string();
+            return;
         }
+        self.groups.remove(self.active_group_index);
+        if self.active_group_index >= self.groups.len() {
+            self.active_group_index = self.groups.len() - 1;
+        }
+        self.status_message = format!("{} groups remaining", self.groups.len());
+    }
 
-        // Calculate new layouts based on split mode
-        match mode {
-            LayoutMode::Horizontal => {
-                // Side by side
-                self.panes[self.active_pane_index].layout = PaneLayout {
-                    x: old_layout.x,
-                    y: old_layout.y,
-                    width: old_layout.width / 2.0,
-                    height: old_layout.height,
-                };
-                new_pane.layout = PaneLayout {
-                    x: old_layout.x + old_layout.width / 2.0,
-                    y: old_layout.y,
-                    width: old_layout.width / 2.0,
-                    height: old_layout.height,
-                };
-            }
-            LayoutMode::Vertical => {
-                // Top and bottom
-                self.panes[self.active_pane_index].layout = PaneLayout {
-                    x: old_layout.x,
-                    y: old_layout.y,
-                    width: old_layout.width,
-                    height: old_layout.height / 2.0,
-                };
-                new_pane.layout = PaneLayout {
-                    x: old_layout.x,
-                    y: old_layout.y + old_layout.height / 2.0,
-                    width: old_layout.width,
-                    height: old_layout.height / 2.0,
-                };
+    /// Switch to a specific group by index
+    pub fn switch_group(&mut self, index: usize) {
+        if index < self.groups.len() {
+            self.active_group_index = index;
+            if let Some(g) = self.active_group() {
+                self.status_message = format!("Switched to {}", g.name);
             }
         }
+    }
 
-        self.panes.push(new_pane);
-        self.pane_states.push(TerminalPaneState::new());
-        self.active_pane_index = self.panes.len() - 1;
-        self.status_message = format!("Split pane, now {} panes", self.panes.len());
+    /// Switch to next group
+    pub fn next_group(&mut self) {
+        if !self.groups.is_empty() {
+            self.active_group_index = (self.active_group_index + 1) % self.groups.len();
+            if let Some(g) = self.active_group() {
+                self.status_message = format!("Switched to {}", g.name);
+            }
+        }
+    }
+
+    /// Switch to previous group
+    pub fn prev_group(&mut self) {
+        if !self.groups.is_empty() {
+            self.active_group_index = if self.active_group_index == 0 {
+                self.groups.len() - 1
+            } else {
+                self.active_group_index - 1
+            };
+            if let Some(g) = self.active_group() {
+                self.status_message = format!("Switched to {}", g.name);
+            }
+        }
+    }
+
+    // ─── Tab management (delegates to active group) ───
+
+    /// Add a new tab to the active group
+    pub fn add_tab(&mut self) {
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let pane_id = self.next_pane_id;
+        self.next_pane_id += 1;
+
+        let config = self.terminal_config.clone();
+        if let Some(group) = self.active_group_mut() {
+            group.add_tab(tab_id, pane_id, &config);
+            self.status_message = format!("New tab {} ({} tabs)", tab_id, self.groups[self.active_group_index].tab_count());
+        }
+    }
+
+    /// Remove the active tab from the active group
+    pub fn remove_tab(&mut self) {
+        let mut should_remove_group = false;
+        if let Some(group) = self.active_group_mut() {
+            if group.remove_active_tab() {
+                self.status_message = format!("{} tabs remaining", group.tab_count());
+            } else {
+                should_remove_group = true;
+            }
+        }
+        
+        if should_remove_group {
+            if self.groups.len() <= 1 {
+                self.status_message = "Cannot remove the last tab of the app".to_string();
+            } else {
+                self.remove_group();
+                self.status_message = "Closed last tab and group".to_string();
+            }
+        }
+    }
+
+    /// Switch to a specific tab by index (1-based for user, 0-based internally)
+    pub fn switch_tab(&mut self, index: usize) {
+        if let Some(group) = self.active_group_mut() {
+            group.switch_tab(index);
+        }
+    }
+
+    /// Switch to next tab
+    pub fn next_tab(&mut self) {
+        if let Some(group) = self.active_group_mut() {
+            group.next_tab();
+        }
+    }
+
+    /// Switch to previous tab
+    pub fn prev_tab(&mut self) {
+        if let Some(group) = self.active_group_mut() {
+            group.prev_tab();
+        }
+    }
+
+    // ─── Pane management (delegates through group → tab) ───
+
+    /// Split the active pane
+    pub fn split_pane(&mut self, direction: SplitDirection) {
+        let new_pane_id = self.next_pane_id;
+        self.next_pane_id += 1;
+
+        let config = self.terminal_config.clone();
+        if let Some(group) = self.active_group_mut() {
+            if let Some(id) = group.split_active_pane(direction, new_pane_id, &config) {
+                self.status_message = format!("Split pane, new pane {}", id);
+            }
+        }
     }
 
     /// Close the active pane
     pub fn close_pane(&mut self) {
-        if self.panes.len() <= 1 {
-            return; // Don't close the last pane
-        }
-
-        self.panes.remove(self.active_pane_index);
-        self.pane_states.remove(self.active_pane_index);
-        if self.active_pane_index >= self.panes.len() {
-            self.active_pane_index = self.panes.len() - 1;
-        }
-
-        // Activate the new current pane
-        if let Some(pane) = self.panes.get_mut(self.active_pane_index) {
-            pane.set_active(true);
+        if let Some(group) = self.active_group_mut() {
+            if group.close_active_pane() {
+                self.status_message = "Closed pane".to_string();
+            } else {
+                self.status_message = "Cannot close the last pane".to_string();
+            }
         }
     }
 
     /// Switch to the next pane
     pub fn next_pane(&mut self) {
-        if self.panes.len() <= 1 {
-            return;
-        }
-
-        if let Some(current) = self.panes.get_mut(self.active_pane_index) {
-            current.set_active(false);
-        }
-
-        self.active_pane_index = (self.active_pane_index + 1) % self.panes.len();
-
-        if let Some(next) = self.panes.get_mut(self.active_pane_index) {
-            next.set_active(true);
+        if let Some(group) = self.active_group_mut() {
+            group.next_pane();
+            self.status_message = "Next pane".to_string();
         }
     }
 
     /// Switch to the previous pane
     pub fn prev_pane(&mut self) {
-        if self.panes.len() <= 1 {
-            return;
-        }
-
-        if let Some(current) = self.panes.get_mut(self.active_pane_index) {
-            current.set_active(false);
-        }
-
-        self.active_pane_index = if self.active_pane_index == 0 {
-            self.panes.len() - 1
-        } else {
-            self.active_pane_index - 1
-        };
-
-        if let Some(prev) = self.panes.get_mut(self.active_pane_index) {
-            prev.set_active(true);
+        if let Some(group) = self.active_group_mut() {
+            group.prev_pane();
+            self.status_message = "Previous pane".to_string();
         }
     }
+
+    // ─── Key handling ───
 
     /// Handle key events, including prefix mode
     pub fn handle_key(&mut self, key: &str) {
         if self.prefix_mode {
-            // Handle prefix mode commands
             match key {
-                "c" => self.split_pane(LayoutMode::Vertical),
-                "d" => self.split_pane(LayoutMode::Horizontal),
+                "c" => self.split_pane(SplitDirection::Vertical),
+                "d" | "\"" => self.split_pane(SplitDirection::Horizontal),
+                "%" => self.split_pane(SplitDirection::Vertical),
                 "n" => self.next_pane(),
                 "p" => self.prev_pane(),
                 "x" => self.close_pane(),
-                _ => {}
+                "t" => self.add_tab(),
+                "w" => self.remove_tab(),
+                "g" => self.next_group(),
+                _ => {
+                    // Check for tab switching with number keys
+                    if let Ok(num) = key.parse::<usize>() {
+                        if num >= 1 && num <= 9 {
+                            self.switch_tab(num - 1);
+                        }
+                    }
+                }
             }
             self.prefix_mode = false;
-        } else {
-            // Check for prefix key (Ctrl+B)
-            if key == "C-b" {
-                self.prefix_mode = true;
-            } else if let Some(pane) = self.active_pane_mut() {
-                // Forward to the active terminal
-                let _ = pane.terminal.write_input(key.as_bytes());
-            }
+        } else if key == "C-b" {
+            self.prefix_mode = true;
+            self.status_message = "PREFIX - waiting for command...".to_string();
+        } else if let Some(pane) = self.active_pane_mut() {
+            let _ = pane.terminal.write_input(key.as_bytes());
         }
     }
 
     /// Handle a raw keyboard event with modifier information
-    /// Returns true if the event was handled
-    pub fn handle_raw_key_event(&mut self, key: &str, ctrl: bool, alt: bool) -> bool {
-        // Use the keyboard module to handle the event
-        crate::keyboard::handle_key_input(self, key, ctrl, alt)
+    pub fn handle_raw_key_event(&mut self, key: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
+        crate::keyboard::handle_key_input(self, key, ctrl, alt, shift)
     }
 }

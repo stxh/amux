@@ -110,9 +110,7 @@ impl Terminal {
 
     /// Start a PTY shell process (e.g., zsh, bash, powershell)
     pub fn spawn_shell(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        eprintln!("[Terminal] spawn_shell called");
         let pty_system = portable_pty::native_pty_system();
-        eprintln!("[Terminal] Got native pty system");
 
         let size = PtySize {
             rows: self.config.rows,
@@ -122,84 +120,35 @@ impl Terminal {
         };
 
         let pair = pty_system.openpty(size)?;
-        eprintln!("[Terminal] openpty succeeded");
         let cmd = portable_pty::CommandBuilder::new_default_prog();
 
         self.child = Some(pair.slave.spawn_command(cmd)?);
-        eprintln!("[Terminal] spawn_command succeeded");
         self.pty_master = Some(pair.master);
-        eprintln!("[Terminal] master assigned");
 
         // Split reader/writer for async I/O
         if let Some(master) = &mut self.pty_master {
             let reader = master.try_clone_reader()?;
-            eprintln!("[Terminal] try_clone_reader succeeded");
             let writer = master.take_writer()?;
-            eprintln!("[Terminal] take_writer succeeded");
             self.pty_reader = Some(reader);
             self.pty_writer = Some(writer);
         }
-        eprintln!("[Terminal] reader/writer assigned");
 
         // Start background thread to read PTY output and feed to terminal
         let term_clone = self.term.clone();
         let needs_redraw = self.needs_redraw.clone();
         let reader = self.pty_reader.take();
-        eprintln!("[Terminal] About to spawn reader thread, reader.is_some={}", reader.is_some());
-        
-        // Write directly to a file from the main thread to verify we reach this point
-        let log_path = format!("C:\\Users\\StXh\\amux_main_{}.txt", std::process::id());
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-            use std::io::Write;
-            let _ = writeln!(f, "Main: About to spawn thread, reader={}", reader.is_some());
-        }
-        
+
         thread::spawn(move || {
-            // Use a file instead of eprintln to avoid buffering issues
-            let log_path = format!("C:\\Users\\StXh\\amux_pty_log_{}.txt", std::process::id());
-            let mut log_file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .ok();
-            if let Some(f) = &mut log_file {
-                use std::io::Write;
-                let _ = writeln!(f, "[PTY Reader] Thread started, reader={}", reader.is_some());
-            }
-            
             if let Some(mut reader) = reader {
                 let mut buf = [0u8; 4096];
-                let mut total_bytes = 0u64;
                 // Create VTE parser - this parses ANSI escape sequences and calls
                 // the appropriate methods on the terminal (input, execute, etc.)
                 let mut parser: Processor<alacritty_terminal::vte::ansi::StdSyncHandler> = Processor::new();
-                
+
                 loop {
                     match reader.read(&mut buf) {
-                        Ok(0) => {
-                            if let Some(f) = &mut log_file {
-                                use std::io::Write;
-                                let _ = writeln!(f, "[PTY Reader] EOF after {} bytes", total_bytes);
-                            }
-                            break;
-                        }
-                        Err(e) => {
-                            if let Some(f) = &mut log_file {
-                                use std::io::Write;
-                                let _ = writeln!(f, "[PTY Reader] Error: {}", e);
-                            }
-                            break;
-                        }
+                        Ok(0) | Err(_) => break,
                         Ok(bytes_read) => {
-                            total_bytes += bytes_read as u64;
-                            if let Some(f) = &mut log_file {
-                                use std::io::Write;
-                                if total_bytes <= 500 {
-                                    let _ = writeln!(f, "[PTY Reader] {} bytes (total={}): {:?}", 
-                                                    bytes_read, total_bytes, 
-                                                    &buf[..bytes_read.min(50)]);
-                                }
-                            }
                             // Parse PTY bytes through VTE parser
                             // This correctly handles ANSI escape sequences
                             if let Ok(mut term) = term_clone.lock() {
@@ -212,12 +161,7 @@ impl Terminal {
                     }
                 }
             }
-            if let Some(f) = &mut log_file {
-                use std::io::Write;
-                let _ = writeln!(f, "[PTY Reader] Thread exiting");
-            }
         });
-        eprintln!("[Terminal] spawn_shell returning Ok");
 
         Ok(())
     }
@@ -254,7 +198,7 @@ impl Terminal {
     /// Get the number of rows in the grid
     pub fn grid_rows(&self) -> usize {
         let term = self.term.lock().unwrap();
-        term.grid().total_lines()
+        term.grid().screen_lines()
     }
 
     /// Get the config
@@ -273,15 +217,16 @@ impl Terminal {
         };
         let mut term = self.term.lock().unwrap();
         term.resize(dimensions);
+        drop(term);
 
-        // Also resize the PTY if available
-        if let Some(master) = &self.pty_master {
-            let _ = master.resize(PtySize {
+        if let Some(master) = &mut self.pty_master {
+            let size = portable_pty::PtySize {
                 rows,
                 cols,
                 pixel_width: 0,
                 pixel_height: 0,
-            });
+            };
+            let _ = master.resize(size);
         }
     }
 

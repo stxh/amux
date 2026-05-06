@@ -181,6 +181,7 @@ dependencies = [
  "portable-pty",
  "skrifa",
  "tokio",
+ "winit",
  "xilem",
 ]
 

@@ -1,31 +1,10 @@
 use crate::terminal::{Terminal, TerminalConfig};
 
-/// Represents a single terminal pane in the multiplexer
+/// Represents a single terminal pane (leaf node of PaneTree)
 pub struct Pane {
     pub id: usize,
     pub terminal: Terminal,
     pub is_active: bool,
-    /// Position and size within the layout (x, y, width, height)
-    pub layout: PaneLayout,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct PaneLayout {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
-impl Default for PaneLayout {
-    fn default() -> Self {
-        Self {
-            x: 0.0,
-            y: 0.0,
-            width: 1.0,
-            height: 1.0,
-        }
-    }
 }
 
 impl Pane {
@@ -34,7 +13,6 @@ impl Pane {
             id,
             terminal: Terminal::new(config),
             is_active: false,
-            layout: PaneLayout::default(),
         }
     }
 
@@ -45,13 +23,4 @@ impl Pane {
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.terminal.resize(cols, rows);
     }
-}
-
-/// Layout mode for tiling
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum LayoutMode {
-    /// Horizontal split (side by side)
-    Horizontal,
-    /// Vertical split (top/bottom)
-    Vertical,
 }

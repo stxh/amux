@@ -1,0 +1,83 @@
+/// 终端视图模块
+///
+/// 策略：canvas 直接作为 flex 子元素填充可用空间。
+/// text_input 单独放在布局中用于键盘捕获（不用 zstack，避免尺寸问题）。
+
+use crate::app::App;
+use crate::pane_tree::Rect;
+use xilem::view::canvas;
+use xilem::WidgetView;
+use xilem::masonry::peniko::Color;
+
+/// 固定字符格尺寸（必须与 terminal_render.rs 中的常量一致）
+const CELL_WIDTH: f64 = 10.8;
+const CELL_HEIGHT: f64 = 25.2;
+
+/// 创建终端 canvas 视图（不包含键盘捕获层）
+/// 键盘捕获的 text_input 在 main.rs 的布局中单独添加
+pub fn terminal_canvas_view() -> impl WidgetView<App> + use<> {
+    canvas(move |state: &mut App, _ctx, scene, available_size| {
+        use xilem::masonry::imaging::Painter;
+        let mut painter = Painter::new(scene);
+
+        // 填充背景
+        let bg_rect = available_size.to_rect();
+        painter.fill(&bg_rect, Color::from_rgba8(0x1e, 0x1e, 0x2e, 0xff)).draw();
+
+        // 获取当前激活的 group 和 tab
+        let Some(group) = state.groups.get(state.active_group_index) else {
+            return;
+        };
+        let Some(tab) = group.tabs.get(group.active_tab_index) else {
+            return;
+        };
+
+        // 对 pane tree 中的所有 pane 计算布局
+        let area = Rect::new(0.0, 0.0, available_size.width, available_size.height);
+        let layouts = tab.pane_tree.layout(area);
+        let active_pane_id = tab.active_pane_id;
+
+        // 收集需要 resize 的 pane（先收集，避免借用冲突）
+        let mut pending: Vec<(usize, u16, u16)> = Vec::new();
+
+        for (pane_id, rect) in &layouts {
+            if available_size.width > 0.0 && available_size.height > 0.0 {
+                let new_cols = (rect.width / CELL_WIDTH).floor() as u16;
+                let new_rows = (rect.height / CELL_HEIGHT).floor() as u16;
+                let new_cols = new_cols.max(2);
+                let new_rows = new_rows.max(2);
+
+                if let Some((pane, _)) = tab.pane_tree.find(*pane_id) {
+                    let current_cols = pane.terminal.grid_cols() as u16;
+                    let current_rows = pane.terminal.grid_rows() as u16;
+                    if new_cols != current_cols || new_rows != current_rows {
+                        pending.push((*pane_id, new_cols, new_rows));
+                    }
+                }
+            }
+
+            if let Some((pane, pane_state)) = tab.pane_tree.find(*pane_id) {
+                let pane_size = xilem::masonry::kurbo::Size::new(rect.width, rect.height);
+                let is_active = *pane_id == active_pane_id;
+
+                // 获取文本渲染上下文
+                // 注意：canvas draw closure 不提供 text_contexts，需要用 scene 直接渲染
+                // 这里我们用 crate::terminal_render 中的函数
+                // 但它需要 fcx/lcx，canvas 不提供…
+                // 退而求其次：先渲染背景和光标，文字渲染用 simple 方案
+                crate::terminal_render::render_terminal_simple(
+                    &mut painter,
+                    &pane.terminal,
+                    pane_state,
+                    is_active,
+                    pane_size,
+                    rect.x,
+                    rect.y,
+                );
+            }
+        }
+
+        // 把 resize 请求加入队列
+        state.pending_resizes.extend(pending);
+    }).alt_text("Terminal multiplexer output")
+}

@@ -24,3 +24,5 @@ peniko = "0.6"
 skrifa = "0.40"
 # Async runtime
 tokio = { version = "1", features = ["time", "rt"] }
+# Event handling
+winit = "0.30"

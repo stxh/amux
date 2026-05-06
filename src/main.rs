@@ -1,188 +1,190 @@
 mod app;
+mod group;
 mod keyboard;
 mod pane;
+mod pane_tree;
+mod tab;
 mod terminal;
 mod terminal_render;
+mod terminal_view;
 
 use app::App;
-use pane::LayoutMode;
-use xilem::view::{button, canvas, flex_col, label, flex_row, sized_box, task_raw};
-use xilem::style::Style;
+use pane_tree::SplitDirection;
+use xilem::view::{button, canvas, flex_col, label, flex_row, sized_box, task_raw, FlexExt, CrossAxisAlignment};
 use xilem::masonry::layout::Length;
 use xilem::{EventLoop, WidgetView, WindowOptions, Xilem};
 use xilem::dpi::LogicalSize;
 use xilem::masonry::peniko::Color;
-use alacritty_terminal::grid::Dimensions;
 use std::time::Duration;
 
-/// Tab bar with pane indicator and action buttons
-fn tab_bar() -> impl WidgetView<App> + use<> {
-    let bg_color = Color::from_rgba8(0x31, 0x32, 0x44, 0xff); // Catppuccin Surface0
-    
-    flex_row((
-        // Left side: current pane indicator (dynamic canvas)
-        sized_box(
-            canvas(move |state: &mut App, ctx, scene, size| {
-                let mut painter = xilem::masonry::imaging::Painter::new(scene);
-                let rect = size.to_rect();
-                painter.fill(&rect, bg_color).draw();
-                
-                // Draw pane indicator text using parley
-                let (fcx, lcx) = ctx.text_contexts();
-                
-                // Debug info about terminal state
-                let debug_text = if let Some(pane) = state.active_pane() {
-                    let grid = pane.terminal.grid();
-                    let cols = grid.columns();
-                    let rows = grid.screen_lines();
-                    let total = grid.total_lines();
-                    let cursor = pane.terminal.cursor();
-                    let disp_offset = pane.terminal.display_offset();
-                    // Check content of a few rows
-                    use alacritty_terminal::index::Line;
-                    use alacritty_terminal::index::Column;
-                    let row0_text: String = (0..cols.min(20)).map(|c| {
-                        let cell = &grid[Line(0)][Column(c)];
-                        if cell.c.is_control() { ' ' } else { cell.c }
-                    }).collect();
-                    let row23_text: String = (0..cols.min(20)).map(|c| {
-                        let cell = &grid[Line(23)][Column(c)];
-                        if cell.c.is_control() { ' ' } else { cell.c }
-                    }).collect();
-                    format!("P{}/{}|{}x{}|tot{}|do{}|c@{},{}|r0:'{}'|r23:'{}'", 
-                            state.active_pane_index + 1, state.panes.len(),
-                            cols, rows, total, disp_offset,
-                            cursor.line.0, cursor.column.0,
-                            row0_text.trim_end(), row23_text.trim_end())
-                } else {
-                    format!("Pane {}/{}", state.active_pane_index + 1, state.panes.len())
-                };
-                
-                let mut builder = lcx.ranged_builder(fcx, &debug_text, 1.0, true);
-                builder.push_default(xilem::masonry::parley::style::FontFamily::Single(
-                    xilem::masonry::parley::style::FontFamilyName::Generic(
-                        xilem::masonry::parley::style::GenericFamily::Monospace,
-                    ),
-                ));
-                builder.push_default(xilem::masonry::parley::style::StyleProperty::FontSize(14.0));
-                
-                let mut layout = builder.build(&debug_text);
-                layout.break_all_lines(None);
-                layout.align(None, xilem::masonry::parley::Alignment::Start, 
-                    xilem::masonry::parley::AlignmentOptions::default());
-                
-                let transform = xilem::masonry::kurbo::Affine::translate((8.0, 5.0));
-                xilem::masonry::core::render_text(&mut painter, transform, &layout, &[xilem::masonry::peniko::Brush::Solid(
-                    Color::from_rgba8(0xc6, 0xd0, 0xf5, 0xff)
-                )], true);
-            }).alt_text("Pane indicator")
-        ).fixed_width(Length::px(150.0)).fixed_height(Length::px(28.0)),
-        
-        // Right side: action buttons
-        button(label("+"), |data: &mut App| {
-            data.split_pane(LayoutMode::Vertical);
-        }),
-        button(label("-"), |data: &mut App| {
-            data.split_pane(LayoutMode::Horizontal);
-        }),
-        button(label("<"), |data: &mut App| {
-            data.prev_pane();
-        }),
-        button(label(">"), |data: &mut App| {
-            data.next_pane();
-        }),
+// ─── Catppuccin Mocha Colors ───
+const CRUST: Color = Color::from_rgba8(0x11, 0x11, 0x1b, 0xff);
+const BASE: Color = Color::from_rgba8(0x1e, 0x1e, 0x2e, 0xff);
+const MANTLE: Color = Color::from_rgba8(0x18, 0x18, 0x25, 0xff);
+const SURFACE0: Color = Color::from_rgba8(0x31, 0x32, 0x44, 0xff);
+const SURFACE1: Color = Color::from_rgba8(0x45, 0x47, 0x5a, 0xff);
+const TEXT_COLOR: Color = Color::from_rgba8(0xc6, 0xd0, 0xf5, 0xff);
+const BLUE: Color = Color::from_rgba8(0x89, 0xb4, 0xfa, 0xff);
+const TEAL: Color = Color::from_rgba8(0x94, 0xe2, 0xd5, 0xff);
+
+fn sidebar_item(idx: usize, text: String, is_active: bool, is_plus: bool) -> impl WidgetView<App> + use<> {
+    let mut l = label(text);
+    if is_active {
+        // We can't easily style the button background in simple xilem, but we can style the label text
+        l = l.weight(xilem::masonry::parley::style::FontWeight::BOLD);
+    }
+    button(l, move |data: &mut App| {
+        if is_plus {
+            data.add_group();
+        } else {
+            data.switch_group(idx);
+        }
+    })
+}
+
+/// Left sidebar - vertical group toolbar (compact, icon-based)
+fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
+    let mut items: Vec<_> = state.groups.iter().enumerate().map(|(idx, group)| {
+        let is_active = idx == state.active_group_index;
+        sidebar_item(idx, group.icon.clone(), is_active, false)
+    }).collect();
+
+    // Group Add button
+    items.push(sidebar_item(999, "+".to_string(), false, true));
+
+    // Settings button
+    let settings_btn = button(label("⚙"), |data: &mut App| {
+        data.status_message = "Settings not implemented yet".to_string();
+    });
+
+    flex_col((
+        flex_col(items).flex(1.0),
+        settings_btn,
     ))
-    .background(bg_color)
 }
 
-/// Status bar showing keyboard shortcuts
-fn status_bar() -> impl WidgetView<App> + use<> {
-    label("Ctrl+B: prefix | c:split-v | d:split-h | n:next | p:prev | x:close | Shift+PgUp/PgDn: scroll")
-        .padding(4.0)
-}
-
-/// Main application layout with cmux-style design
-fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
-    let active_idx = data.active_pane_index;
+fn tab_item(idx: usize, text: String, is_active: bool) -> impl WidgetView<App> + use<> {
+    let mut l = label(text);
+    if is_active {
+        l = l.weight(xilem::masonry::parley::style::FontWeight::BOLD);
+    }
     
-    // Periodic task to force redraw - terminals update asynchronously
-    // This task runs every 100ms and increments a counter to trigger view rebuild
-    let redraw_trigger = task_raw(
+    // The main tab button
+    let tab_btn = button(l, move |data: &mut App| {
+        data.switch_tab(idx);
+    });
+    
+    // The close button
+    let close_btn = button(label(" ✕ ").text_size(10.0), move |data: &mut App| {
+        data.switch_tab(idx);
+        data.remove_tab();
+    });
+    
+    // Combine them and constrain width to look more uniform
+    sized_box(flex_row((
+        tab_btn,
+        close_btn,
+        sized_box(label("")).fixed_width(Length::px(4.0)) // Small spacing between tabs
+    )))
+}
+
+/// Tab bar with active group's tabs
+fn tab_bar(state: &App) -> impl WidgetView<App> + use<> {
+    let mut items = Vec::new();
+    if let Some(group) = state.groups.get(state.active_group_index) {
+        for (idx, tab) in group.tabs.iter().enumerate() {
+            let pane_count = tab.pane_tree.pane_count();
+            let label_text = if pane_count > 1 {
+                format!(" {} [{}] ", tab.name, pane_count)
+            } else {
+                format!(" {} ", tab.name)
+            };
+            let is_active = idx == group.active_tab_index;
+            items.push(tab_item(idx, label_text, is_active));
+        }
+    }
+
+    let add_tab_btn = button(label(" + "), |data: &mut App| {
+        data.add_tab();
+    });
+
+    let prefix_indicator = if state.prefix_mode {
+        label(" [PREFIX] ").weight(xilem::masonry::parley::style::FontWeight::BOLD)
+    } else {
+        label("")
+    };
+
+    flex_row((
+        flex_row(items),
+        add_tab_btn,
+        prefix_indicator,
+    ))
+}
+
+/// VSCode style status bar
+fn status_bar(state: &App) -> impl WidgetView<App> + use<> {
+    let left_info = if let Some(g) = state.active_group() {
+        if let Some(t) = g.active_tab() {
+            format!("Group: {} | Tab: {} | Panes: {}", g.name, t.name, t.pane_count())
+        } else {
+            format!("Group: {}", g.name)
+        }
+    } else {
+        "Ready".to_string()
+    };
+    
+    let status = format!("{} | {}", state.status_message, left_info);
+    
+    // In xilem we can wrap label in sized_box to give it background color if we want,
+    // but a simple label works for now
+    flex_row((
+        label(status).text_size(12.0),
+    ))
+}
+
+/// Main application layout
+fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
+    // Periodic task to force redraw
+    let _redraw_trigger = task_raw(
         |proxy, _state: &mut App| async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             loop {
                 interval.tick().await;
-                // Send a tick message to trigger rebuild
                 let _ = proxy.message(());
             }
         },
         |state: &mut App, ()| {
-            // Increment redraw counter to trigger view rebuild
             state.redraw_counter += 1;
+            state.apply_pending_resizes();
         },
     );
 
-    // Create a terminal canvas that renders ALL panes in their layout positions
-    let terminal_area = canvas(move |state: &mut App, ctx, scene, available_size| {
-        let mut painter = xilem::masonry::imaging::Painter::new(scene);
-        
-        // Get text contexts for rendering terminal text
-        let (fcx, lcx) = ctx.text_contexts();
-        
-        // Background - fill the entire available space
-        let bg_rect = available_size.to_rect();
-        painter.fill(&bg_rect, Color::from_rgba8(0x1e, 0x1e, 0x2e, 0xff)).draw(); // Catppuccin Base
-        
-        // Render all panes in their layout positions
-        for (pane_idx, pane) in state.panes.iter().enumerate() {
-            let pane_state = &state.pane_states[pane_idx];
-            let layout = &pane.layout;
-            
-            // Calculate absolute position and size within the terminal area
-            let x = layout.x * available_size.width;
-            let y = layout.y * available_size.height;
-            let w = layout.width * available_size.width;
-            let h = layout.height * available_size.height;
-            
-            let pane_size = xilem::masonry::kurbo::Size::new(w, h);
-            
-            // Render the terminal with offset
-            terminal_render::render_terminal_with_offset(
-                &mut painter,
-                &pane.terminal,
-                pane_state,
-                pane_idx == active_idx,
-                pane_size,
-                x,
-                y,
-                fcx,
-                lcx,
-            );
-        }
-    }).alt_text("Terminal multiplexer output");
+    let terminal_area = terminal_view::terminal_input_view();
 
-    // cmux-style layout
-    const TERMINAL_HEIGHT: f64 = 700.0;
-    
-    let terminal_box = sized_box(terminal_area)
-        .fixed_height(Length::px(TERMINAL_HEIGHT));
-    
-    flex_col((
-        tab_bar(),
-        terminal_box,
-        status_bar(),
-    ))
+    // Main content area (right side)
+    let content = flex_col((
+        tab_bar(data),
+        terminal_area.flex(1.0),
+        status_bar(data),
+    )).cross_axis_alignment(CrossAxisAlignment::Stretch);
+
+    // Root layout: sidebar | content | gap
+    flex_row((
+        sidebar(data),
+        content.flex(1.0),
+        sized_box(label("")).fixed_width(Length::px(8.0)), // right gap
+    )).cross_axis_alignment(CrossAxisAlignment::Stretch)
 }
 
 fn main() {
     let app_state = App::new();
-    
+
     let app = Xilem::new_simple(
         app_state,
         app_logic,
         WindowOptions::new("amux - Terminal Multiplexer")
             .with_initial_inner_size(LogicalSize::new(1200.0, 800.0)),
     );
-    
+
     app.run_in(EventLoop::with_user_event()).unwrap();
 }
