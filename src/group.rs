@@ -9,7 +9,7 @@ use crate::terminal::TerminalConfig;
 
 /// Icons for groups (auto-assigned based on group index)
 const GROUP_ICONS: &[&str] = &[
-    "⬤", "◆", "▲", "■", "●", "◼", "▶", "★", "◉", "⏣",
+    "💻", "🚀", "🌐", "🛠️", "📊", "📂", "✨", "🔥", "💡", "📝",
 ];
 
 /// A terminal group containing multiple tabs

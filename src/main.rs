@@ -5,12 +5,12 @@ mod pane;
 mod pane_tree;
 mod tab;
 mod terminal;
+mod terminal_keyboard;
 mod terminal_render;
 mod terminal_view;
 
 use app::App;
-use pane_tree::SplitDirection;
-use xilem::view::{button, canvas, flex_col, label, flex_row, sized_box, task_raw, FlexExt, CrossAxisAlignment};
+use xilem::view::{button, flex_col, label, flex_row, sized_box, task_raw, FlexExt, CrossAxisAlignment};
 use xilem::masonry::layout::Length;
 use xilem::{EventLoop, WidgetView, WindowOptions, Xilem};
 use xilem::dpi::LogicalSize;
@@ -64,28 +64,19 @@ fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
 }
 
 fn tab_item(idx: usize, text: String, is_active: bool) -> impl WidgetView<App> + use<> {
-    let mut l = label(text);
+    let mut l = label(format!("{} ✕ ", text));
     if is_active {
         l = l.weight(xilem::masonry::parley::style::FontWeight::BOLD);
     }
-    
-    // The main tab button
-    let tab_btn = button(l, move |data: &mut App| {
-        data.switch_tab(idx);
-    });
-    
-    // The close button
-    let close_btn = button(label(" ✕ ").text_size(10.0), move |data: &mut App| {
-        data.switch_tab(idx);
-        data.remove_tab();
-    });
-    
-    // Combine them and constrain width to look more uniform
-    sized_box(flex_row((
-        tab_btn,
-        close_btn,
-        sized_box(label("")).fixed_width(Length::px(4.0)) // Small spacing between tabs
-    )))
+
+    button(l, move |data: &mut App| {
+        let current_active = data.groups[data.active_group_index].active_tab_index;
+        if current_active == idx {
+            data.remove_tab();
+        } else {
+            data.switch_tab(idx);
+        }
+    })
 }
 
 /// Tab bar with active group's tabs
@@ -159,11 +150,22 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
         },
     );
 
-    let terminal_area = terminal_view::terminal_input_view();
+    let terminal_area = terminal_view::terminal_canvas_view();
+    let keyboard_capture = crate::terminal_keyboard::terminal_keyboard_view(|state: &mut App, key_str: String| {
+        if !key_str.is_empty() {
+            // We don't have modifier state easily available here, so we assume false for now
+            // except if the character is uppercase or a control char
+            state.handle_raw_key_event(&key_str, false, false, false);
+            true
+        } else {
+            false
+        }
+    });
 
     // Main content area (right side)
     let content = flex_col((
         tab_bar(data),
+        keyboard_capture,
         terminal_area.flex(1.0),
         status_bar(data),
     )).cross_axis_alignment(CrossAxisAlignment::Stretch);

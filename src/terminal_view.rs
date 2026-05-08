@@ -16,7 +16,7 @@ const CELL_HEIGHT: f64 = 25.2;
 /// 创建终端 canvas 视图（不包含键盘捕获层）
 /// 键盘捕获的 text_input 在 main.rs 的布局中单独添加
 pub fn terminal_canvas_view() -> impl WidgetView<App> + use<> {
-    canvas(move |state: &mut App, _ctx, scene, available_size| {
+    canvas(move |state: &mut App, ctx, scene, available_size| {
         use xilem::masonry::imaging::Painter;
         let mut painter = Painter::new(scene);
 
@@ -31,6 +31,9 @@ pub fn terminal_canvas_view() -> impl WidgetView<App> + use<> {
         let Some(tab) = group.tabs.get(group.active_tab_index) else {
             return;
         };
+
+        // 获取文本渲染上下文
+        let (fcx, lcx) = ctx.text_contexts();
 
         // 对 pane tree 中的所有 pane 计算布局
         let area = Rect::new(0.0, 0.0, available_size.width, available_size.height);
@@ -60,12 +63,7 @@ pub fn terminal_canvas_view() -> impl WidgetView<App> + use<> {
                 let pane_size = xilem::masonry::kurbo::Size::new(rect.width, rect.height);
                 let is_active = *pane_id == active_pane_id;
 
-                // 获取文本渲染上下文
-                // 注意：canvas draw closure 不提供 text_contexts，需要用 scene 直接渲染
-                // 这里我们用 crate::terminal_render 中的函数
-                // 但它需要 fcx/lcx，canvas 不提供…
-                // 退而求其次：先渲染背景和光标，文字渲染用 simple 方案
-                crate::terminal_render::render_terminal_simple(
+                crate::terminal_render::render_terminal_with_offset(
                     &mut painter,
                     &pane.terminal,
                     pane_state,
@@ -73,6 +71,8 @@ pub fn terminal_canvas_view() -> impl WidgetView<App> + use<> {
                     pane_size,
                     rect.x,
                     rect.y,
+                    fcx,
+                    lcx,
                 );
             }
         }

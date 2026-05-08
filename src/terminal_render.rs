@@ -192,11 +192,18 @@ pub fn render_terminal_with_offset(
             row_text.push(ch);
 
             // Determine foreground color for this character
-            let fg_color = if is_default_fg(cell.fg) {
+            let mut fg_color = if is_default_fg(cell.fg) {
                 colors::TEXT
             } else {
                 term_color_to_peniko(cell.fg)
             };
+
+            // If this is the cursor cell, invert colors (cursor bg is TEXT, text fg is CRUST)
+            let cursor_screen_row = cursor_line_abs + display_offset as i32;
+            if is_active && cursor_screen_row == row_idx as i32 && col_idx == cursor_col {
+                fg_color = colors::CRUST;
+            }
+
             char_colors.push(fg_color);
         }
 
@@ -233,6 +240,16 @@ pub fn render_terminal_with_offset(
                 let strike_rect = Rect::new(x, y + cell_h / 2.0 - 1.0, x + cell_w, y + cell_h / 2.0 + 1.0);
                 painter.fill(&strike_rect, fg_color).draw();
             }
+        }
+
+        // Draw cursor block for this row before text
+        let cursor_screen_row = cursor_line_abs + display_offset as i32;
+        let is_cursor_row = cursor_screen_row == row_idx as i32;
+        if is_active && is_cursor_row && cursor_col < cols as usize {
+            let cursor_y = offset_y + cursor_screen_row as f64 * cell_h;
+            let cursor_x = offset_x + cursor_col as f64 * cell_w;
+            let cursor_rect = Rect::new(cursor_x, cursor_y, cursor_x + cell_w, cursor_y + cell_h);
+            painter.fill(&cursor_rect, colors::TEXT).draw();
         }
 
         // Render text with per-character coloring using ranged_builder
@@ -276,16 +293,6 @@ pub fn render_terminal_with_offset(
             render_text(painter, transform, &layout, &brushes, true);
         }
     }
-
-    // Draw cursor block
-    let cursor_screen_row = cursor_line_abs + display_offset as i32;
-    if is_active && cursor_screen_row >= 0 && (cursor_screen_row as usize) < display_lines && cursor_col < cols as usize {
-        let cursor_y = offset_y + cursor_screen_row as f64 * cell_h;
-        let cursor_x = offset_x + cursor_col as f64 * cell_w;
-        let cursor_rect = Rect::new(cursor_x, cursor_y, cursor_x + cell_w, cursor_y + cell_h);
-        painter.fill(&cursor_rect, colors::ROSEWATER).draw();
-    }
-
     // Border
     let border_color = if is_active { colors::BLUE } else { colors::SURFACE0 };
     let border = Stroke::new(2.0);

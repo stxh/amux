@@ -6,41 +6,27 @@
 /// 3. Routes prefix commands (Ctrl+B followed by c/d/n/p/x)
 /// 4. Forwards other input to the active terminal's PTY using alacritty-style handling
 
-use masonry::core::{
-    Widget, WidgetId, EventCtx, PropertiesMut, PropertiesRef, TextEvent,
+use xilem::masonry::core::{
+    Widget, EventCtx, PropertiesMut, PropertiesRef, TextEvent,
     RegisterCtx, LayoutCtx, MeasureCtx, PaintCtx, AccessCtx, ChildrenIds,
 };
-use masonry::kurbo::Size;
-use masonry::imaging::Painter;
+use xilem::masonry::kurbo::{Size, Axis};
+use xilem::masonry::imaging::Painter;
 use accesskit::{Node, Role};
-use masonry::layout::{LenReq, Axis};
-use masonry::core::KeyboardEvent;
-use winit::event::ElementState;
-use winit::keyboard::{Key, NamedKey, ModifiersState};
-use tracing::{Span, trace_span};
+use xilem::masonry::layout::LenReq;
 
 use crate::app::App;
 
-/// Widget that captures keyboard input for terminal
-pub struct TerminalKeyboardWidget {
-    /// Callback to invoke when a key is pressed
-    /// Returns true if the key was handled (suppresses further processing)
-    on_key: Box<dyn Fn(&mut App, &KeyboardEvent) -> bool + Send + Sync>,
-}
+pub struct TerminalKeyboardWidget;
 
 impl TerminalKeyboardWidget {
-    pub fn new<F>(on_key: F) -> Self
-    where
-        F: Fn(&mut App, &KeyboardEvent) -> bool + Send + Sync + 'static,
-    {
-        Self {
-            on_key: Box::new(on_key),
-        }
+    pub fn new() -> Self {
+        Self
     }
 }
 
 impl Widget for TerminalKeyboardWidget {
-    type Action = ();
+    type Action = String;
 
     /// Allow this widget to receive focus
     fn accepts_focus(&self) -> bool {
@@ -62,15 +48,43 @@ impl Widget for TerminalKeyboardWidget {
         match event {
             TextEvent::Keyboard(key_event) => {
                 // Only handle key-down events (ignore key-up and repeat for now)
-                if key_event.state != ElementState::Pressed {
+                if format!("{:?}", key_event.state) != "Pressed" {
                     return;
                 }
 
                 // Request focus to ensure we keep receiving keyboard events
                 ctx.request_focus();
 
+                let key_dbg = format!("{:?}", key_event.key).to_lowercase();
+                let mut key_str = String::new();
+                if key_dbg.contains("enter") {
+                    key_str = "enter".to_string();
+                } else if key_dbg.contains("backspace") {
+                    key_str = "backspace".to_string();
+                } else if key_dbg.contains("tab") {
+                    key_str = "tab".to_string();
+                } else if key_dbg.contains("escape") {
+                    key_str = "escape".to_string();
+                } else if key_dbg.contains("arrowup") {
+                    key_str = "up".to_string();
+                } else if key_dbg.contains("arrowdown") {
+                    key_str = "down".to_string();
+                } else if key_dbg.contains("arrowleft") {
+                    key_str = "left".to_string();
+                } else if key_dbg.contains("arrowright") {
+                    key_str = "right".to_string();
+                } else if key_dbg.contains("character(\"") {
+                    if let Some(start) = key_dbg.find("character(\"") {
+                        if let Some(end) = key_dbg[start + 12..].find("\")") {
+                            key_str = key_dbg[start + 12 .. start + 12 + end].to_string();
+                        }
+                    }
+                }
+
                 // Submit action to notify Xilem of state change
-                ctx.submit_action(());
+                if !key_str.is_empty() {
+                    ctx.submit_action::<String>(key_str);
+                }
             }
             _ => {}
         }
@@ -122,8 +136,66 @@ impl Widget for TerminalKeyboardWidget {
     fn children_ids(&self) -> ChildrenIds {
         ChildrenIds::new()
     }
+}
 
-    fn make_trace_span(&self, id: WidgetId) -> Span {
-        trace_span!("TerminalKeyboardWidget", id = id.trace())
+pub struct TerminalKeyboardView<F> {
+    on_key: F,
+}
+
+pub fn terminal_keyboard_view<F>(on_key: F) -> TerminalKeyboardView<F>
+where
+    F: Fn(&mut App, String) -> bool + Send + Sync + 'static,
+{
+    TerminalKeyboardView { on_key }
+}
+
+impl<F> xilem::core::ViewMarker for TerminalKeyboardView<F> {}
+
+impl<F> xilem::core::View<App, (), xilem::ViewCtx> for TerminalKeyboardView<F>
+where
+    F: Fn(&mut App, String) -> bool + Send + Sync + 'static,
+{
+    type Element = xilem::Pod<TerminalKeyboardWidget>;
+    type ViewState = ();
+
+    fn build(&self, ctx: &mut xilem::ViewCtx, _state: &mut App) -> (Self::Element, Self::ViewState) {
+        let widget = TerminalKeyboardWidget::new();
+        let pod = ctx.create_pod(widget);
+        (pod, ())
+    }
+
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        _view_state: &mut Self::ViewState,
+        _ctx: &mut xilem::ViewCtx,
+        _element: xilem::core::Mut<'_, Self::Element>,
+        _app_state: &mut App,
+    ) {
+    }
+
+    fn teardown(
+        &self,
+        _view_state: &mut Self::ViewState,
+        _ctx: &mut xilem::ViewCtx,
+        _element: xilem::core::Mut<'_, Self::Element>,
+    ) {
+    }
+
+    fn message(
+        &self,
+        _view_state: &mut Self::ViewState,
+        message: &mut xilem::core::MessageCtx,
+        _element: xilem::core::Mut<'_, Self::Element>,
+        app_state: &mut App,
+    ) -> xilem::core::MessageResult<()> {
+        if let Some(action) = message.take_message::<String>() {
+            if (self.on_key)(app_state, *action) {
+                // Handled
+            }
+            xilem::core::MessageResult::Action(())
+        } else {
+            xilem::core::MessageResult::Stale
+        }
     }
 }
