@@ -10,7 +10,8 @@ mod terminal_render;
 mod terminal_view;
 
 use app::App;
-use xilem::view::{button, flex_col, label, flex_row, sized_box, task_raw, FlexExt, CrossAxisAlignment};
+use xilem::view::{button, flex_col, label, flex_row, sized_box, zstack, task_raw, FlexExt, CrossAxisAlignment};
+use xilem::style::Style;
 use xilem::masonry::layout::Length;
 use xilem::{EventLoop, WidgetView, WindowOptions, Xilem};
 use xilem::dpi::LogicalSize;
@@ -64,19 +65,26 @@ fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
 }
 
 fn tab_item(idx: usize, text: String, is_active: bool) -> impl WidgetView<App> + use<> {
-    let mut l = label(format!("{} ✕ ", text));
-    if is_active {
-        l = l.weight(xilem::masonry::parley::style::FontWeight::BOLD);
-    }
+    let bg_color = if is_active {
+        Color::from_rgba8(0x45, 0x47, 0x5a, 0xff) // Surface 1
+    } else {
+        Color::from_rgba8(0x1e, 0x1e, 0x2e, 0x00) // Transparent
+    };
 
-    button(l, move |data: &mut App| {
-        let current_active = data.groups[data.active_group_index].active_tab_index;
-        if current_active == idx {
-            data.remove_tab();
-        } else {
+    // Style the tabs to look like a single integrated unit.
+    // We use two buttons but remove the gap between them.
+    flex_row((
+        button(label(text), move |data: &mut App| {
             data.switch_tab(idx);
-        }
-    })
+        })
+        .padding(0.0), 
+        button(label("✕"), move |data: &mut App| {
+            data.remove_tab_at(idx);
+        })
+        .padding(0.0),
+    ))
+    .background(bg_color)
+    .padding(8.0)
 }
 
 /// Tab bar with active group's tabs
@@ -116,7 +124,8 @@ fn tab_bar(state: &App) -> impl WidgetView<App> + use<> {
 fn status_bar(state: &App) -> impl WidgetView<App> + use<> {
     let left_info = if let Some(g) = state.active_group() {
         if let Some(t) = g.active_tab() {
-            format!("Group: {} | Tab: {} | Panes: {}", g.name, t.name, t.pane_count())
+            let (col, row) = state.cursor_pos();
+            format!("Group: {} | Tab: {} | Panes: {} | Cursor: ({}, {})", g.name, t.name, t.pane_count(), col, row)
         } else {
             format!("Group: {}", g.name)
         }
@@ -124,13 +133,13 @@ fn status_bar(state: &App) -> impl WidgetView<App> + use<> {
         "Ready".to_string()
     };
     
-    let status = format!("{} | {}", state.status_message, left_info);
+    let status = format!("{} | {} | Debug: {}", state.status_message, left_info, state.last_key_info);
     
-    // In xilem we can wrap label in sized_box to give it background color if we want,
-    // but a simple label works for now
     flex_row((
-        label(status).text_size(12.0),
+        label(status).text_size(12.0).color(Color::WHITE),
     ))
+    .background(Color::from_rgba8(0x1e, 0x1e, 0x2e, 0xff))
+    .padding(4.0)
 }
 
 /// Main application layout
@@ -151,11 +160,10 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
     );
 
     let terminal_area = terminal_view::terminal_canvas_view();
-    let keyboard_capture = crate::terminal_keyboard::terminal_keyboard_view(|state: &mut App, key_str: String| {
-        if !key_str.is_empty() {
-            // We don't have modifier state easily available here, so we assume false for now
-            // except if the character is uppercase or a control char
-            state.handle_raw_key_event(&key_str, false, false, false);
+    let keyboard_capture = crate::terminal_keyboard::terminal_keyboard_view(|state: &mut App, action: crate::terminal_keyboard::KeyAction| {
+        println!("DEBUG: Key received: key='{}', ctrl={}, alt={}, shift={}", action.key, action.ctrl, action.alt, action.shift);
+        if !action.key.is_empty() {
+            state.handle_raw_key_event(&action.key, action.ctrl, action.alt, action.shift);
             true
         } else {
             false
@@ -165,7 +173,12 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
     // Main content area (right side)
     let content = flex_col((
         tab_bar(data),
-        keyboard_capture,
+        // Overlay the keyboard capture widget OVER the hint text.
+        // This ensures every click in this area hits the capture widget.
+        sized_box(zstack((
+            label(" <<< CLICK HERE TO FOCUS TERMINAL >>> ").weight(xilem::masonry::parley::style::FontWeight::BOLD).text_size(12.0),
+            keyboard_capture,
+        ))).fixed_height(Length::px(30.0)).background(SURFACE0),
         terminal_area.flex(1.0),
         status_bar(data),
     )).cross_axis_alignment(CrossAxisAlignment::Stretch);
@@ -184,7 +197,7 @@ fn main() {
     let app = Xilem::new_simple(
         app_state,
         app_logic,
-        WindowOptions::new("amux - Terminal Multiplexer")
+        WindowOptions::new("amux - Terminal Multiplexer [UI UPDATED]")
             .with_initial_inner_size(LogicalSize::new(1200.0, 800.0)),
     );
 

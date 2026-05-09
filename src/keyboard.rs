@@ -137,7 +137,7 @@ fn build_modifiers(ctrl: bool, alt: bool, shift: bool) -> u8 {
 }
 
 /// Determine if we should build an escape sequence for this key
-fn should_build_sequence(key: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
+fn should_build_sequence(key: &str, ctrl: bool, alt: bool, _shift: bool) -> bool {
     matches!(key,
         "up" | "down" | "left" | "right"
         | "home" | "end" | "pageup" | "pagedown"

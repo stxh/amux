@@ -30,6 +30,8 @@ pub struct App {
     pub redraw_counter: u64,
     /// Pending resizes (pane_id, cols, rows)
     pub pending_resizes: Vec<(PaneId, u16, u16)>,
+    /// Last captured key info for debugging
+    pub last_key_info: String,
 }
 
 impl AppState for App {
@@ -58,6 +60,7 @@ impl App {
             running: true,
             redraw_counter: 0,
             pending_resizes: Vec::new(),
+            last_key_info: "None".to_string(),
         }
     }
 
@@ -179,12 +182,17 @@ impl App {
         }
     }
 
-    /// Remove the active tab from the active group
-    pub fn remove_tab(&mut self) {
+    /// Remove a specific tab by index
+    pub fn remove_tab_at(&mut self, index: usize) {
+        println!("DEBUG: App::remove_tab_at: index={}, total_tabs={}", index, self.active_group().map_or(0, |g| g.tabs.len()));
         let mut should_remove_group = false;
         if let Some(group) = self.active_group_mut() {
-            if group.remove_active_tab() {
-                self.status_message = format!("{} tabs remaining", group.tab_count());
+            if group.tabs.len() > 1 {
+                group.tabs.remove(index);
+                if group.active_tab_index >= group.tabs.len() {
+                    group.active_tab_index = group.tabs.len().saturating_sub(1);
+                }
+                self.status_message = format!("Removed tab {}", index + 1);
             } else {
                 should_remove_group = true;
             }
@@ -192,12 +200,24 @@ impl App {
         
         if should_remove_group {
             if self.groups.len() <= 1 {
+                println!("DEBUG: Cannot remove last tab/group");
                 self.status_message = "Cannot remove the last tab of the app".to_string();
             } else {
+                println!("DEBUG: Removing group because last tab closed");
                 self.remove_group();
                 self.status_message = "Closed last tab and group".to_string();
             }
         }
+    }
+
+    /// Remove the active tab
+    pub fn remove_tab(&mut self) {
+        let idx = if let Some(group) = self.active_group() {
+            group.active_tab_index
+        } else {
+            0
+        };
+        self.remove_tab_at(idx);
     }
 
     /// Switch to a specific tab by index (1-based for user, 0-based internally)
@@ -298,6 +318,19 @@ impl App {
 
     /// Handle a raw keyboard event with modifier information
     pub fn handle_raw_key_event(&mut self, key: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
+        let info = format!("Key: {} (Ctrl: {}, Alt: {}, Shift: {})", key, ctrl, alt, shift);
+        println!("DEBUG: App::handle_raw_key_event: {}", info);
+        self.last_key_info = info;
         crate::keyboard::handle_key_input(self, key, ctrl, alt, shift)
+    }
+
+    /// Get current cursor position of active pane
+    pub fn cursor_pos(&self) -> (usize, usize) {
+        if let Some(pane) = self.active_pane() {
+            let p = pane.terminal.cursor();
+            (p.column.0, p.line.0.max(0) as usize)
+        } else {
+            (0, 0)
+        }
     }
 }

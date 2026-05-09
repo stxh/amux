@@ -7,15 +7,24 @@
 /// 4. Forwards other input to the active terminal's PTY using alacritty-style handling
 
 use xilem::masonry::core::{
-    Widget, EventCtx, PropertiesMut, PropertiesRef, TextEvent,
+    Widget, EventCtx, PropertiesMut, PropertiesRef, TextEvent, PointerEvent,
     RegisterCtx, LayoutCtx, MeasureCtx, PaintCtx, AccessCtx, ChildrenIds,
 };
 use xilem::masonry::kurbo::{Size, Axis};
 use xilem::masonry::imaging::Painter;
+use xilem::masonry::peniko::Color;
 use accesskit::{Node, Role};
 use xilem::masonry::layout::LenReq;
 
 use crate::app::App;
+
+#[derive(Debug, Clone)]
+pub struct KeyAction {
+    pub key: String,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+}
 
 pub struct TerminalKeyboardWidget;
 
@@ -26,7 +35,7 @@ impl TerminalKeyboardWidget {
 }
 
 impl Widget for TerminalKeyboardWidget {
-    type Action = String;
+    type Action = KeyAction;
 
     /// Allow this widget to receive focus
     fn accepts_focus(&self) -> bool {
@@ -39,24 +48,41 @@ impl Widget for TerminalKeyboardWidget {
     }
 
     /// Handle keyboard events - this is where the magic happens
+    fn on_pointer_event(
+        &mut self,
+        ctx: &mut EventCtx<'_>,
+        _props: &mut PropertiesMut<'_>,
+        event: &PointerEvent,
+    ) {
+        let event_str = format!("{:?}", event);
+        if event_str.contains("PointerDown") || event_str.contains("Down") {
+            println!("DEBUG: TerminalKeyboardWidget clicked (event: {}), requesting focus", event_str);
+            ctx.request_focus();
+        }
+    }
+
     fn on_text_event(
         &mut self,
         ctx: &mut EventCtx<'_>,
         _props: &mut PropertiesMut<'_>,
         event: &TextEvent,
     ) {
+        println!("DEBUG: TerminalKeyboardWidget received text event: {:?}", event);
         match event {
             TextEvent::Keyboard(key_event) => {
+                // Request focus again to be safe
+                ctx.request_focus();
+
                 // Only handle key-down events (ignore key-up and repeat for now)
-                if format!("{:?}", key_event.state) != "Pressed" {
+                let state_str = format!("{:?}", key_event.state);
+                if state_str != "Pressed" {
                     return;
                 }
 
-                // Request focus to ensure we keep receiving keyboard events
-                ctx.request_focus();
-
                 let key_dbg = format!("{:?}", key_event.key).to_lowercase();
                 let mut key_str = String::new();
+                
+                // Better key parsing
                 if key_dbg.contains("enter") {
                     key_str = "enter".to_string();
                 } else if key_dbg.contains("backspace") {
@@ -65,25 +91,34 @@ impl Widget for TerminalKeyboardWidget {
                     key_str = "tab".to_string();
                 } else if key_dbg.contains("escape") {
                     key_str = "escape".to_string();
-                } else if key_dbg.contains("arrowup") {
+                } else if key_dbg.contains("arrowup") || key_dbg.contains("up") {
                     key_str = "up".to_string();
-                } else if key_dbg.contains("arrowdown") {
+                } else if key_dbg.contains("arrowdown") || key_dbg.contains("down") {
                     key_str = "down".to_string();
-                } else if key_dbg.contains("arrowleft") {
+                } else if key_dbg.contains("arrowleft") || key_dbg.contains("left") {
                     key_str = "left".to_string();
-                } else if key_dbg.contains("arrowright") {
+                } else if key_dbg.contains("arrowright") || key_dbg.contains("right") {
                     key_str = "right".to_string();
-                } else if key_dbg.contains("character(\"") {
-                    if let Some(start) = key_dbg.find("character(\"") {
-                        if let Some(end) = key_dbg[start + 12..].find("\")") {
-                            key_str = key_dbg[start + 12 .. start + 12 + end].to_string();
-                        }
+                } else if let Some(start) = key_dbg.find("character(\"") {
+                    if let Some(end) = key_dbg[start + 12..].find("\")") {
+                        key_str = key_dbg[start + 12 .. start + 12 + end].to_string();
                     }
+                } else if key_dbg.len() == 1 {
+                    // Fallback for some environments
+                    key_str = key_dbg;
                 }
 
-                // Submit action to notify Xilem of state change
                 if !key_str.is_empty() {
-                    ctx.submit_action::<String>(key_str);
+                    let modifiers = key_event.modifiers;
+                    let mods_dbg = format!("{:?}", modifiers).to_uppercase();
+                    let action = KeyAction {
+                        key: key_str,
+                        ctrl: mods_dbg.contains("CONTROL") || mods_dbg.contains("CTRL"),
+                        alt: mods_dbg.contains("ALT"),
+                        shift: mods_dbg.contains("SHIFT"),
+                    };
+                    println!("DEBUG: TerminalKeyboardWidget captured: {:?}", action);
+                    ctx.submit_action::<KeyAction>(action);
                 }
             }
             _ => {}
@@ -100,7 +135,7 @@ impl Widget for TerminalKeyboardWidget {
         _len_req: LenReq,
         _cross_length: Option<f64>,
     ) -> f64 {
-        0.0 // Zero size - this is just a keyboard capture target
+        30.0 // Match the height in main.rs
     }
 
     fn layout(
@@ -116,9 +151,10 @@ impl Widget for TerminalKeyboardWidget {
         &mut self,
         _ctx: &mut PaintCtx<'_>,
         _props: &PropertiesRef<'_>,
-        _painter: &mut Painter<'_>,
+        painter: &mut Painter<'_>,
     ) {
-        // Nothing to paint
+        // We won't draw anything for now to keep it clean, 
+        // the background comes from the parent sized_box.
     }
 
     fn accessibility_role(&self) -> Role {
@@ -144,7 +180,7 @@ pub struct TerminalKeyboardView<F> {
 
 pub fn terminal_keyboard_view<F>(on_key: F) -> TerminalKeyboardView<F>
 where
-    F: Fn(&mut App, String) -> bool + Send + Sync + 'static,
+    F: Fn(&mut App, KeyAction) -> bool + Send + Sync + 'static,
 {
     TerminalKeyboardView { on_key }
 }
@@ -153,7 +189,7 @@ impl<F> xilem::core::ViewMarker for TerminalKeyboardView<F> {}
 
 impl<F> xilem::core::View<App, (), xilem::ViewCtx> for TerminalKeyboardView<F>
 where
-    F: Fn(&mut App, String) -> bool + Send + Sync + 'static,
+    F: Fn(&mut App, KeyAction) -> bool + Send + Sync + 'static,
 {
     type Element = xilem::Pod<TerminalKeyboardWidget>;
     type ViewState = ();
@@ -189,7 +225,7 @@ where
         _element: xilem::core::Mut<'_, Self::Element>,
         app_state: &mut App,
     ) -> xilem::core::MessageResult<()> {
-        if let Some(action) = message.take_message::<String>() {
+        if let Some(action) = message.take_message::<KeyAction>() {
             if (self.on_key)(app_state, *action) {
                 // Handled
             }
