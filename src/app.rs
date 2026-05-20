@@ -32,6 +32,8 @@ pub struct App {
     pub pending_resizes: Vec<(PaneId, u16, u16)>,
     /// Last captured key info for debugging
     pub last_key_info: String,
+    /// Redraw proxy to wake up the event loop directly
+    pub redraw_proxy: Option<xilem::core::MessageProxy<()>>,
 }
 
 impl AppState for App {
@@ -61,6 +63,22 @@ impl App {
             redraw_counter: 0,
             pending_resizes: Vec::new(),
             last_key_info: "None".to_string(),
+            redraw_proxy: None,
+        }
+    }
+
+    /// Register the Xilem message proxy to wake up the event loop when terminal stdout changes
+    pub fn register_redraw_proxy(&mut self, proxy: xilem::core::MessageProxy<()>) {
+        println!("DEBUG: Registering redraw_proxy on App!");
+        self.redraw_proxy = Some(proxy.clone());
+        
+        // Propagate to all existing terminals in all groups & tabs
+        for group in &mut self.groups {
+            for tab in &mut group.tabs {
+                tab.pane_tree.for_each_mut(&mut |pane, _| {
+                    *pane.terminal.redraw_notifier.lock().unwrap() = Some(proxy.clone());
+                });
+            }
         }
     }
 
@@ -113,7 +131,14 @@ impl App {
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
 
-        let group = TerminalGroup::new(group_id, tab_id, pane_id, &self.terminal_config);
+        let mut group = TerminalGroup::new(group_id, tab_id, pane_id, &self.terminal_config);
+        if let Some(proxy) = &self.redraw_proxy {
+            for tab in &mut group.tabs {
+                tab.pane_tree.for_each_mut(&mut |pane, _| {
+                    *pane.terminal.redraw_notifier.lock().unwrap() = Some(proxy.clone());
+                });
+            }
+        }
         self.groups.push(group);
         self.active_group_index = self.groups.len() - 1;
         self.status_message = format!("Created group {} ({} groups total)", group_id, self.groups.len());
@@ -176,8 +201,16 @@ impl App {
         self.next_pane_id += 1;
 
         let config = self.terminal_config.clone();
+        let proxy = self.redraw_proxy.clone(); // Clone first to avoid borrow conflicts
         if let Some(group) = self.active_group_mut() {
             group.add_tab(tab_id, pane_id, &config);
+            if let Some(p) = proxy {
+                if let Some(tab) = group.tabs.last_mut() {
+                    tab.pane_tree.for_each_mut(&mut |pane, _| {
+                        *pane.terminal.redraw_notifier.lock().unwrap() = Some(p.clone());
+                    });
+                }
+            }
             self.status_message = format!("New tab {} ({} tabs)", tab_id, self.groups[self.active_group_index].tab_count());
         }
     }
@@ -249,8 +282,16 @@ impl App {
         self.next_pane_id += 1;
 
         let config = self.terminal_config.clone();
+        let proxy = self.redraw_proxy.clone(); // Clone first to avoid borrow conflicts
         if let Some(group) = self.active_group_mut() {
             if let Some(id) = group.split_active_pane(direction, new_pane_id, &config) {
+                if let Some(p) = proxy {
+                    if let Some(tab) = group.active_tab_mut() {
+                        if let Some((new_pane, _)) = tab.pane_tree.find_mut(id) {
+                            *new_pane.terminal.redraw_notifier.lock().unwrap() = Some(p.clone());
+                        }
+                    }
+                }
                 self.status_message = format!("Split pane, new pane {}", id);
             }
         }

@@ -61,6 +61,7 @@ pub struct Terminal {
     config: TerminalConfig,
     event_receiver: mpsc::Receiver<alacritty_terminal::event::Event>,
     needs_redraw: Arc<Mutex<bool>>,
+    pub redraw_notifier: Arc<Mutex<Option<xilem::core::MessageProxy<()>>>>,
 }
 
 /// Event listener for terminal state changes
@@ -105,6 +106,7 @@ impl Terminal {
             config: config.clone(),
             event_receiver,
             needs_redraw,
+            redraw_notifier: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -137,6 +139,7 @@ impl Terminal {
         let term_clone = self.term.clone();
         let needs_redraw = self.needs_redraw.clone();
         let reader = self.pty_reader.take();
+        let redraw_notifier = self.redraw_notifier.clone();
 
         thread::spawn(move || {
             println!("DEBUG: PTY reader thread started!");
@@ -167,6 +170,9 @@ impl Terminal {
                                 }
                             }
                             *needs_redraw.lock().unwrap() = true;
+                            if let Some(proxy) = &*redraw_notifier.lock().unwrap() {
+                                let _ = proxy.message(());
+                            }
                         }
                     }
                 }

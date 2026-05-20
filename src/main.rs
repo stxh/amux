@@ -145,21 +145,14 @@ fn status_bar(state: &App) -> impl WidgetView<App> + use<> {
 
 /// Main application layout
 fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
-    // Periodic task to force redraw
+    // Redraw trigger task to handle event-driven redraws
     let _redraw_trigger = task_raw(
-        |proxy, _state: &mut App| async move {
-            println!("DEBUG: task_raw future spawned and starting loop!");
-            let mut interval = tokio::time::interval(Duration::from_millis(16));
-            let mut ticks = 0;
-            loop {
-                interval.tick().await;
-                ticks += 1;
-                if ticks % 100 == 0 {
-                    println!("DEBUG: task_raw background loop ticked 100 times, ticks = {}", ticks);
-                }
-                if let Err(e) = proxy.message(()) {
-                    println!("DEBUG: task_raw message error: {:?}", e);
-                    break;
+        |proxy, state: &mut App| {
+            state.register_redraw_proxy(proxy.clone());
+            async move {
+                println!("DEBUG: task_raw future spawned (now 100% event-driven)!");
+                loop {
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
                 }
             }
         },
