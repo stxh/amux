@@ -9,14 +9,16 @@
 use xilem::masonry::core::{
     Widget, EventCtx, PropertiesMut, PropertiesRef, TextEvent, PointerEvent,
     RegisterCtx, LayoutCtx, MeasureCtx, PaintCtx, AccessCtx, ChildrenIds,
+    WidgetPod, NewWidget, WidgetMut, AccessEvent
 };
 use xilem::masonry::kurbo::{Size, Axis};
 use xilem::masonry::imaging::Painter;
-use xilem::masonry::peniko::Color;
 use accesskit::{Node, Role};
 use xilem::masonry::layout::LenReq;
 
 use crate::app::App;
+use xilem::core::ViewPathTracker;
+
 
 #[derive(Debug, Clone)]
 pub struct KeyAction {
@@ -54,9 +56,8 @@ impl Widget for TerminalKeyboardWidget {
         _props: &mut PropertiesMut<'_>,
         event: &PointerEvent,
     ) {
-        let event_str = format!("{:?}", event);
-        if event_str.contains("PointerDown") || event_str.contains("Down") {
-            println!("DEBUG: TerminalKeyboardWidget clicked (event: {}), requesting focus", event_str);
+        if let PointerEvent::Down(..) = event {
+            println!("DEBUG: TerminalKeyboardWidget clicked, requesting focus");
             ctx.request_focus();
         }
     }
@@ -147,10 +148,13 @@ impl Widget for TerminalKeyboardWidget {
         _ctx: &mut MeasureCtx<'_>,
         _props: &PropertiesRef<'_>,
         _axis: Axis,
-        _len_req: LenReq,
+        len_req: LenReq,
         _cross_length: Option<f64>,
     ) -> f64 {
-        30.0 // Match the height in main.rs
+        match len_req {
+            LenReq::MinContent | LenReq::MaxContent => 0.0,
+            LenReq::FitContent(space) => space,
+        }
     }
 
     fn layout(
@@ -166,7 +170,7 @@ impl Widget for TerminalKeyboardWidget {
         &mut self,
         _ctx: &mut PaintCtx<'_>,
         _props: &PropertiesRef<'_>,
-        painter: &mut Painter<'_>,
+        _painter: &mut Painter<'_>,
     ) {
         // We won't draw anything for now to keep it clean, 
         // the background comes from the parent sized_box.
@@ -250,6 +254,275 @@ where
             xilem::core::MessageResult::Action(())
         } else {
             xilem::core::MessageResult::Stale
+        }
+    }
+}
+
+// ─── Focusless Button Widget & View ───
+
+pub struct FocuslessButtonWidget {
+    child: WidgetPod<dyn Widget>,
+}
+
+#[derive(PartialEq, Debug, Clone)]
+pub struct FocuslessButtonPress {
+    pub button: Option<xilem::masonry::core::PointerButton>,
+}
+
+impl FocuslessButtonWidget {
+    pub fn new(child: NewWidget<impl Widget + ?Sized>) -> Self {
+        Self {
+            child: child.erased().to_pod(),
+        }
+    }
+    
+    pub fn set_child(this: &mut WidgetMut<'_, Self>, child: NewWidget<impl Widget + ?Sized>) {
+        this.ctx.remove_child(std::mem::replace(
+            &mut this.widget.child,
+            child.erased().to_pod(),
+        ));
+    }
+
+    pub fn child_mut<'t>(this: &'t mut WidgetMut<'_, Self>) -> WidgetMut<'t, dyn Widget> {
+        this.ctx.get_mut(&mut this.widget.child)
+    }
+}
+
+impl Widget for FocuslessButtonWidget {
+    type Action = FocuslessButtonPress;
+
+    fn accepts_focus(&self) -> bool {
+        false
+    }
+
+    fn accepts_text_input(&self) -> bool {
+        false
+    }
+
+    fn propagates_pointer_interaction(&self) -> bool {
+        false
+    }
+
+    fn register_children(&mut self, ctx: &mut RegisterCtx<'_>) {
+        ctx.register_child(&mut self.child);
+    }
+
+    fn on_pointer_event(
+        &mut self,
+        ctx: &mut EventCtx<'_>,
+        _props: &mut PropertiesMut<'_>,
+        event: &PointerEvent,
+    ) {
+        match event {
+            PointerEvent::Down(..) => {
+                ctx.capture_pointer();
+                ctx.request_paint_only();
+            }
+            PointerEvent::Up(pointer_event) => {
+                if ctx.is_active() && ctx.is_hovered() {
+                    ctx.submit_action::<Self::Action>(FocuslessButtonPress {
+                        button: pointer_event.button,
+                    });
+                }
+                ctx.request_paint_only();
+            }
+            _ => (),
+        }
+    }
+
+    fn on_text_event(
+        &mut self,
+        _ctx: &mut EventCtx<'_>,
+        _props: &mut PropertiesMut<'_>,
+        _event: &TextEvent,
+    ) {}
+
+    fn on_access_event(
+        &mut self,
+        ctx: &mut EventCtx<'_>,
+        _props: &mut PropertiesMut<'_>,
+        event: &AccessEvent,
+    ) {
+        match event.action {
+            accesskit::Action::Click => {
+                ctx.submit_action::<Self::Action>(FocuslessButtonPress { button: None });
+            }
+            _ => {}
+        }
+    }
+
+    fn measure(
+        &mut self,
+        ctx: &mut MeasureCtx<'_>,
+        _props: &PropertiesRef<'_>,
+        axis: Axis,
+        len_req: LenReq,
+        cross_length: Option<f64>,
+    ) -> f64 {
+        use xilem::masonry::layout::LayoutSize;
+
+        let auto_length = len_req.into();
+        let context_size = LayoutSize::maybe(axis.cross(), cross_length);
+
+        ctx.compute_length(
+            &mut self.child,
+            auto_length,
+            context_size,
+            axis,
+            cross_length,
+        )
+    }
+
+    fn layout(&mut self, ctx: &mut LayoutCtx<'_>, _props: &PropertiesRef<'_>, size: Size) {
+        let child_size = ctx.compute_size(&mut self.child, xilem::masonry::layout::SizeDef::fit(size), size.into());
+        ctx.run_layout(&mut self.child, child_size);
+
+        let child_origin = ((size - child_size).to_vec2() * 0.5).to_point();
+        ctx.place_child(&mut self.child, child_origin);
+
+        ctx.derive_baselines(&self.child);
+    }
+
+    fn paint(
+        &mut self,
+        _ctx: &mut PaintCtx<'_>,
+        _props: &PropertiesRef<'_>,
+        _painter: &mut Painter<'_>,
+    ) {}
+
+    fn accessibility_role(&self) -> Role {
+        Role::Button
+    }
+
+    fn accessibility(
+        &mut self,
+        _ctx: &mut AccessCtx<'_>,
+        _props: &PropertiesRef<'_>,
+        node: &mut Node,
+    ) {
+        node.add_action(accesskit::Action::Click);
+    }
+
+    fn children_ids(&self) -> ChildrenIds {
+        ChildrenIds::from_slice(&[self.child.id()])
+    }
+}
+
+pub struct FocuslessButton<State, Action, F, V> {
+    child: V,
+    callback: F,
+    phantom: std::marker::PhantomData<fn(State) -> Action>,
+}
+
+pub fn focusless_button<
+    State: 'static,
+    Action,
+    V: xilem::WidgetView<State, Action>,
+    F: Fn(&mut State) -> Action + Send + Sync + 'static,
+>(
+    child: V,
+    callback: F,
+) -> FocuslessButton<
+    State,
+    Action,
+    impl Fn(&mut State, Option<xilem::masonry::core::PointerButton>) -> xilem::core::MessageResult<Action> + Send + Sync + 'static,
+    V,
+> {
+    FocuslessButton {
+        child,
+        callback: move |state: &mut State, button| match button {
+            None | Some(xilem::masonry::core::PointerButton::Primary) => {
+                xilem::core::MessageResult::Action(callback(state))
+            }
+            _ => xilem::core::MessageResult::Nop,
+        },
+        phantom: std::marker::PhantomData,
+    }
+}
+
+impl<State, Action, F, V> xilem::core::ViewMarker for FocuslessButton<State, Action, F, V> {}
+
+const FOCUSLESS_BUTTON_CONTENT_VIEW_ID: xilem::core::ViewId = xilem::core::ViewId::new(0xf0c1c4bf);
+
+impl<F, V, State, Action> xilem::core::View<State, Action, xilem::ViewCtx> for FocuslessButton<State, Action, F, V>
+where
+    State: 'static,
+    Action: 'static,
+    V: xilem::WidgetView<State, Action>,
+    F: Fn(&mut State, Option<xilem::masonry::core::PointerButton>) -> xilem::core::MessageResult<Action> + Send + Sync + 'static,
+{
+    type Element = xilem::Pod<FocuslessButtonWidget>;
+    type ViewState = V::ViewState;
+
+    fn build(&self, ctx: &mut xilem::ViewCtx, app_state: &mut State) -> (Self::Element, Self::ViewState) {
+        let (child, child_state) = ctx.with_id(FOCUSLESS_BUTTON_CONTENT_VIEW_ID, |ctx| {
+            xilem::core::View::<State, Action, _>::build(&self.child, ctx, app_state)
+        });
+        (
+            ctx.with_action_widget(|ctx| {
+                let pod = ctx.create_pod(FocuslessButtonWidget::new(child.new_widget));
+                pod
+            }),
+            child_state,
+        )
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        state: &mut Self::ViewState,
+        ctx: &mut xilem::ViewCtx,
+        mut element: xilem::core::Mut<'_, Self::Element>,
+        app_state: &mut State,
+    ) {
+        ctx.with_id(FOCUSLESS_BUTTON_CONTENT_VIEW_ID, |ctx| {
+            xilem::core::View::<State, Action, _>::rebuild(
+                &self.child,
+                &prev.child,
+                state,
+                ctx,
+                FocuslessButtonWidget::child_mut(&mut element).downcast(),
+                app_state,
+            );
+        });
+    }
+
+    fn teardown(
+        &self,
+        view_state: &mut Self::ViewState,
+        ctx: &mut xilem::ViewCtx,
+        mut element: xilem::core::Mut<'_, Self::Element>,
+    ) {
+        ctx.with_id(FOCUSLESS_BUTTON_CONTENT_VIEW_ID, |ctx| {
+            xilem::core::View::<State, Action, _>::teardown(
+                &self.child,
+                view_state,
+                ctx,
+                FocuslessButtonWidget::child_mut(&mut element).downcast(),
+            );
+        });
+        ctx.teardown_action_source(element);
+    }
+
+    fn message(
+        &self,
+        view_state: &mut Self::ViewState,
+        message: &mut xilem::core::MessageCtx,
+        mut element: xilem::core::Mut<'_, Self::Element>,
+        app_state: &mut State,
+    ) -> xilem::core::MessageResult<Action> {
+        match message.take_first() {
+            Some(FOCUSLESS_BUTTON_CONTENT_VIEW_ID) => self.child.message(
+                view_state,
+                message,
+                FocuslessButtonWidget::child_mut(&mut element).downcast(),
+                app_state,
+            ),
+            None => match message.take_message::<FocuslessButtonPress>() {
+                Some(press) => (self.callback)(app_state, press.button),
+                None => xilem::core::MessageResult::Stale,
+            },
+            _ => xilem::core::MessageResult::Stale,
         }
     }
 }

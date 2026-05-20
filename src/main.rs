@@ -11,7 +11,7 @@ mod terminal_view;
 
 use app::App;
 use xilem::core::fork;
-use xilem::view::{button, flex_col, label, flex_row, sized_box, zstack, task_raw, FlexExt, CrossAxisAlignment};
+use xilem::view::{flex_col, label, flex_row, sized_box, zstack, task_raw, FlexExt, CrossAxisAlignment};
 use xilem::style::Style;
 use xilem::masonry::layout::Length;
 use xilem::{EventLoop, WidgetView, WindowOptions, Xilem};
@@ -35,7 +35,7 @@ fn sidebar_item(idx: usize, text: String, is_active: bool, is_plus: bool) -> imp
         // We can't easily style the button background in simple xilem, but we can style the label text
         l = l.weight(xilem::masonry::parley::style::FontWeight::BOLD);
     }
-    button(l, move |data: &mut App| {
+    crate::terminal_keyboard::focusless_button(l, move |data: &mut App| {
         if is_plus {
             data.add_group();
         } else {
@@ -55,7 +55,7 @@ fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
     items.push(sidebar_item(999, "+".to_string(), false, true));
 
     // Settings button
-    let settings_btn = button(label("⚙"), |data: &mut App| {
+    let settings_btn = crate::terminal_keyboard::focusless_button(label("⚙"), |data: &mut App| {
         data.status_message = "Settings not implemented yet".to_string();
     });
 
@@ -75,11 +75,11 @@ fn tab_item(idx: usize, text: String, is_active: bool) -> impl WidgetView<App> +
     // Style the tabs to look like a single integrated unit.
     // We use two buttons but remove the gap between them.
     flex_row((
-        button(label(text), move |data: &mut App| {
+        crate::terminal_keyboard::focusless_button(label(text), move |data: &mut App| {
             data.switch_tab(idx);
         })
         .padding(0.0), 
-        button(label("✕"), move |data: &mut App| {
+        crate::terminal_keyboard::focusless_button(label("✕"), move |data: &mut App| {
             data.remove_tab_at(idx);
         })
         .padding(0.0),
@@ -104,7 +104,7 @@ fn tab_bar(state: &App) -> impl WidgetView<App> + use<> {
         }
     }
 
-    let add_tab_btn = button(label(" + "), |data: &mut App| {
+    let add_tab_btn = crate::terminal_keyboard::focusless_button(label(" + "), |data: &mut App| {
         data.add_tab();
     });
 
@@ -181,13 +181,10 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
     // Main content area (right side)
     let content = flex_col((
         tab_bar(data),
-        // Overlay the keyboard capture widget OVER the hint text.
-        // This ensures every click in this area hits the capture widget.
-        sized_box(zstack((
-            label(" <<< CLICK HERE TO FOCUS TERMINAL >>> ").weight(xilem::masonry::parley::style::FontWeight::BOLD).text_size(12.0),
+        zstack((
+            terminal_area,
             keyboard_capture,
-        ))).fixed_height(Length::px(30.0)).background(SURFACE0),
-        terminal_area.flex(1.0),
+        )).flex(1.0),
         status_bar(data),
     )).cross_axis_alignment(CrossAxisAlignment::Stretch);
 
