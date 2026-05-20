@@ -67,6 +67,10 @@ impl Widget for TerminalKeyboardWidget {
         _props: &mut PropertiesMut<'_>,
         event: &TextEvent,
     ) {
+        use xilem::masonry::core::keyboard::Key as MasonryKey;
+        use xilem::masonry::core::keyboard::NamedKey as MasonryNamedKey;
+        use xilem::masonry::core::keyboard::KeyState;
+
         println!("DEBUG: TerminalKeyboardWidget received text event: {:?}", event);
         match event {
             TextEvent::Keyboard(key_event) => {
@@ -74,39 +78,50 @@ impl Widget for TerminalKeyboardWidget {
                 ctx.request_focus();
 
                 // Only handle key-down events (ignore key-up and repeat for now)
-                let state_str = format!("{:?}", key_event.state);
-                if state_str != "Pressed" {
+                if key_event.state != KeyState::Down {
                     return;
                 }
 
-                let key_dbg = format!("{:?}", key_event.key).to_lowercase();
-                let mut key_str = String::new();
-                
-                // Better key parsing
-                if key_dbg.contains("enter") {
-                    key_str = "enter".to_string();
-                } else if key_dbg.contains("backspace") {
-                    key_str = "backspace".to_string();
-                } else if key_dbg.contains("tab") {
-                    key_str = "tab".to_string();
-                } else if key_dbg.contains("escape") {
-                    key_str = "escape".to_string();
-                } else if key_dbg.contains("arrowup") || key_dbg.contains("up") {
-                    key_str = "up".to_string();
-                } else if key_dbg.contains("arrowdown") || key_dbg.contains("down") {
-                    key_str = "down".to_string();
-                } else if key_dbg.contains("arrowleft") || key_dbg.contains("left") {
-                    key_str = "left".to_string();
-                } else if key_dbg.contains("arrowright") || key_dbg.contains("right") {
-                    key_str = "right".to_string();
-                } else if let Some(start) = key_dbg.find("character(\"") {
-                    if let Some(end) = key_dbg[start + 12..].find("\")") {
-                        key_str = key_dbg[start + 12 .. start + 12 + end].to_string();
+                let key_str = match &key_event.key {
+                    MasonryKey::Character(s) => {
+                        if s == " " {
+                            "space".to_string()
+                        } else {
+                            s.to_string()
+                        }
                     }
-                } else if key_dbg.len() == 1 {
-                    // Fallback for some environments
-                    key_str = key_dbg;
-                }
+                    MasonryKey::Named(named) => {
+                        match named {
+                            MasonryNamedKey::Enter => "enter".to_string(),
+                            MasonryNamedKey::Backspace => "backspace".to_string(),
+                            MasonryNamedKey::Tab => "tab".to_string(),
+                            MasonryNamedKey::Escape => "escape".to_string(),
+                            MasonryNamedKey::ArrowUp => "up".to_string(),
+                            MasonryNamedKey::ArrowDown => "down".to_string(),
+                            MasonryNamedKey::ArrowLeft => "left".to_string(),
+                            MasonryNamedKey::ArrowRight => "right".to_string(),
+                            MasonryNamedKey::Home => "home".to_string(),
+                            MasonryNamedKey::End => "end".to_string(),
+                            MasonryNamedKey::PageUp => "pageup".to_string(),
+                            MasonryNamedKey::PageDown => "pagedown".to_string(),
+                            MasonryNamedKey::Insert => "insert".to_string(),
+                            MasonryNamedKey::Delete => "delete".to_string(),
+                            MasonryNamedKey::F1 => "f1".to_string(),
+                            MasonryNamedKey::F2 => "f2".to_string(),
+                            MasonryNamedKey::F3 => "f3".to_string(),
+                            MasonryNamedKey::F4 => "f4".to_string(),
+                            MasonryNamedKey::F5 => "f5".to_string(),
+                            MasonryNamedKey::F6 => "f6".to_string(),
+                            MasonryNamedKey::F7 => "f7".to_string(),
+                            MasonryNamedKey::F8 => "f8".to_string(),
+                            MasonryNamedKey::F9 => "f9".to_string(),
+                            MasonryNamedKey::F10 => "f10".to_string(),
+                            MasonryNamedKey::F11 => "f11".to_string(),
+                            MasonryNamedKey::F12 => "f12".to_string(),
+                            _ => "".to_string(),
+                        }
+                    }
+                };
 
                 if !key_str.is_empty() {
                     let modifiers = key_event.modifiers;
@@ -196,7 +211,9 @@ where
 
     fn build(&self, ctx: &mut xilem::ViewCtx, _state: &mut App) -> (Self::Element, Self::ViewState) {
         let widget = TerminalKeyboardWidget::new();
-        let pod = ctx.create_pod(widget);
+        let pod = ctx.with_action_widget(|ctx| {
+            ctx.create_pod(widget)
+        });
         (pod, ())
     }
 
@@ -213,9 +230,10 @@ where
     fn teardown(
         &self,
         _view_state: &mut Self::ViewState,
-        _ctx: &mut xilem::ViewCtx,
-        _element: xilem::core::Mut<'_, Self::Element>,
+        ctx: &mut xilem::ViewCtx,
+        element: xilem::core::Mut<'_, Self::Element>,
     ) {
+        ctx.teardown_action_source(element);
     }
 
     fn message(

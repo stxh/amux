@@ -139,6 +139,7 @@ impl Terminal {
         let reader = self.pty_reader.take();
 
         thread::spawn(move || {
+            println!("DEBUG: PTY reader thread started!");
             if let Some(mut reader) = reader {
                 let mut buf = [0u8; 4096];
                 // Create VTE parser - this parses ANSI escape sequences and calls
@@ -147,8 +148,17 @@ impl Terminal {
 
                 loop {
                     match reader.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
+                        Ok(0) => {
+                            println!("DEBUG: PTY reader thread read 0 bytes (EOF). Exiting loop.");
+                            break;
+                        }
+                        Err(e) => {
+                            println!("DEBUG: PTY reader thread read error: {:?}. Exiting loop.", e);
+                            break;
+                        }
                         Ok(bytes_read) => {
+                            let text = String::from_utf8_lossy(&buf[..bytes_read]);
+                            println!("DEBUG: PTY reader thread read {} bytes: {:?}", bytes_read, text);
                             // Parse PTY bytes through VTE parser
                             // This correctly handles ANSI escape sequences
                             if let Ok(mut term) = term_clone.lock() {
@@ -161,6 +171,7 @@ impl Terminal {
                     }
                 }
             }
+            println!("DEBUG: PTY reader thread stopped.");
         });
 
         Ok(())
