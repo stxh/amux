@@ -333,4 +333,19 @@ impl App {
             (0, 0)
         }
     }
+
+    /// Check if any terminal pane in the entire multiplexer needs a redraw
+    pub fn check_and_clear_redraw(&self) -> bool {
+        let mut needs_redraw = false;
+        for group in &self.groups {
+            for tab in &group.tabs {
+                tab.pane_tree.for_each(&mut |pane, _| {
+                    if pane.terminal.check_and_clear_redraw() {
+                        needs_redraw = true;
+                    }
+                });
+            }
+        }
+        needs_redraw
+    }
 }

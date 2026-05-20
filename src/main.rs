@@ -10,6 +10,7 @@ mod terminal_render;
 mod terminal_view;
 
 use app::App;
+use xilem::core::fork;
 use xilem::view::{button, flex_col, label, flex_row, sized_box, zstack, task_raw, FlexExt, CrossAxisAlignment};
 use xilem::style::Style;
 use xilem::masonry::layout::Length;
@@ -147,19 +148,33 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
     // Periodic task to force redraw
     let _redraw_trigger = task_raw(
         |proxy, _state: &mut App| async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            println!("DEBUG: task_raw future spawned and starting loop!");
+            let mut interval = tokio::time::interval(Duration::from_millis(16));
+            let mut ticks = 0;
             loop {
                 interval.tick().await;
-                let _ = proxy.message(());
+                ticks += 1;
+                if ticks % 100 == 0 {
+                    println!("DEBUG: task_raw background loop ticked 100 times, ticks = {}", ticks);
+                }
+                if let Err(e) = proxy.message(()) {
+                    println!("DEBUG: task_raw message error: {:?}", e);
+                    break;
+                }
             }
         },
         |state: &mut App, ()| {
-            state.redraw_counter += 1;
+            // println!("DEBUG: task_raw event callback received message!");
+            let before = state.redraw_counter;
+            if state.check_and_clear_redraw() {
+                state.redraw_counter += 1;
+                println!("DEBUG: task_raw check_and_clear_redraw was TRUE! redraw_counter updated from {} to {}", before, state.redraw_counter);
+            }
             state.apply_pending_resizes();
         },
     );
 
-    let terminal_area = terminal_view::terminal_canvas_view();
+    let terminal_area = terminal_view::terminal_canvas_view(data.redraw_counter);
     let keyboard_capture = crate::terminal_keyboard::terminal_keyboard_view(|state: &mut App, action: crate::terminal_keyboard::KeyAction| {
         println!("DEBUG: Key received: key='{}', ctrl={}, alt={}, shift={}", action.key, action.ctrl, action.alt, action.shift);
         if !action.key.is_empty() {
@@ -184,11 +199,13 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
     )).cross_axis_alignment(CrossAxisAlignment::Stretch);
 
     // Root layout: sidebar | content | gap
-    flex_row((
+    let main_view = flex_row((
         sidebar(data),
         content.flex(1.0),
         sized_box(label("")).fixed_width(Length::px(8.0)), // right gap
-    )).cross_axis_alignment(CrossAxisAlignment::Stretch)
+    )).cross_axis_alignment(CrossAxisAlignment::Stretch);
+
+    fork(main_view, Some(_redraw_trigger))
 }
 
 fn main() {

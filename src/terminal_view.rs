@@ -15,9 +15,8 @@ const CELL_HEIGHT: f64 = 25.2;
 
 /// 创建终端 canvas 视图（不包含键盘捕获层）
 /// 键盘捕获的 text_input 在 main.rs 的布局中单独添加
-pub fn terminal_canvas_view() -> impl WidgetView<App> + use<> {
+pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<> {
     canvas(move |state: &mut App, ctx, scene, available_size| {
-        println!("DEBUG: terminal_canvas_view callback executed! redraw_counter = {}", state.redraw_counter);
         use xilem::masonry::imaging::Painter;
         let mut painter = Painter::new(scene);
 
