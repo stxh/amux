@@ -35,11 +35,8 @@ fn sidebar_item(idx: usize, text: String, is_active: bool, is_plus: bool) -> imp
     } else {
         Color::from_rgba8(0x00, 0x00, 0x00, 0x00) // transparent
     };
-    let l = if is_active {
-        label(text).weight(xilem::masonry::parley::style::FontWeight::BOLD)
-    } else {
-        label(text)
-    };
+    let text_color = if is_active { BLUE } else { SURFACE1 };
+    let l = label(text).text_size(14.0).color(text_color);
     sized_box(
         crate::terminal_keyboard::focusless_button(l, move |data: &mut App| {
             if is_plus {
@@ -49,11 +46,13 @@ fn sidebar_item(idx: usize, text: String, is_active: bool, is_plus: bool) -> imp
             }
         })
     )
+    .fixed_width(Length::px(36.0))
+    .fixed_height(Length::px(36.0))
     .background(bg)
-    .padding(4.0)
+    .padding(2.0)
 }
 
-/// Left sidebar - vertical group toolbar (compact, icon-based)
+/// Left sidebar - vertical group toolbar (VSCode-style activity bar)
 fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
     let mut items: Vec<_> = state.groups.iter().enumerate().map(|(idx, group)| {
         let is_active = idx == state.active_group_index;
@@ -63,22 +62,16 @@ fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
     // Group Add button
     items.push(sidebar_item(999, "+".to_string(), false, true));
 
-    // Settings button
-    let settings_btn = sized_box(
-        crate::terminal_keyboard::focusless_button(label("S"), |data: &mut App| {
-            data.status_message = "Settings not implemented yet".to_string();
-        })
-    ).padding(4.0);
-
     sized_box(
         flex_col((
-            flex_col(items).flex(1.0),
-            settings_btn,
+            flex_col(items)
+                .cross_axis_alignment(CrossAxisAlignment::Center)
+                .flex(1.0),
         ))
     )
-    .fixed_width(Length::px(48.0))
-    .background(MANTLE)
-    .padding(4.0)
+    .fixed_width(Length::px(44.0))
+    .background(CRUST)
+    .padding(2.0)
 }
 
 fn tab_item(idx: usize, text: String, is_active: bool) -> impl WidgetView<App> + use<> {

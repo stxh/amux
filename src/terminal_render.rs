@@ -143,13 +143,23 @@ pub fn render_terminal_with_offset(
     let cursor_col = cursor.column.0;
     let cursor_line_abs = cursor.line.0;
 
-    // Fixed cell dimensions
+    // Measure actual monospace character width from font metrics
     const FONT_SIZE: f32 = 18.0;
-    const CELL_WIDTH: f64 = 10.8;
-    const CELL_HEIGHT: f64 = 25.2;
 
-    let cell_w = CELL_WIDTH;
-    let cell_h = CELL_HEIGHT;
+    // Build a probe layout with a known string to measure character advance width
+    let (cell_w, cell_h) = {
+        let probe = "MMMMMMMMMM"; // 10 chars
+        let mut mb = lcx.ranged_builder(fcx, probe, 1.0, true);
+        mb.push_default(StyleProperty::FontFamily(FontFamily::Single(
+            FontFamilyName::Generic(GenericFamily::Monospace),
+        )));
+        mb.push_default(StyleProperty::FontSize(FONT_SIZE));
+        let mut ml = mb.build(probe);
+        ml.break_all_lines(None);
+        let w = ml.width() as f64 / 10.0;
+        let h = ml.height() as f64;
+        (w, h)
+    };
 
     // Calculate how many rows we can actually display
     let max_displayable_rows = (size.height / cell_h).floor() as usize;

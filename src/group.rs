@@ -7,9 +7,9 @@ use crate::pane_tree::{PaneId, SplitDirection};
 use crate::tab::Tab;
 use crate::terminal::TerminalConfig;
 
-/// Icons for groups (auto-assigned based on group index)
+/// Icons for groups (auto-assigned based on group index — simple numbers)
 const GROUP_ICONS: &[&str] = &[
-    "💻", "🚀", "🌐", "🛠️", "📊", "📂", "✨", "🔥", "💡", "📝",
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
 ];
 
 /// A terminal group containing multiple tabs

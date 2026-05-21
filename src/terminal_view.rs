@@ -9,10 +9,6 @@ use xilem::view::canvas;
 use xilem::WidgetView;
 use xilem::masonry::peniko::Color;
 
-/// 固定字符格尺寸（必须与 terminal_render.rs 中的常量一致）
-const CELL_WIDTH: f64 = 10.8;
-const CELL_HEIGHT: f64 = 25.2;
-
 /// 创建终端 canvas 视图（不包含键盘捕获层）
 /// 键盘捕获的 text_input 在 main.rs 的布局中单独添加
 pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<> {
@@ -37,6 +33,20 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
         // 获取文本渲染上下文
         let (fcx, lcx) = ctx.text_contexts();
 
+        // Dynamically measure monospace cell dimensions from font metrics
+        use xilem::masonry::parley::style::{StyleProperty, FontFamily, FontFamilyName, GenericFamily};
+        let (cell_w, cell_h) = {
+            let probe = "MMMMMMMMMM"; // 10 chars
+            let mut mb = lcx.ranged_builder(fcx, probe, 1.0, true);
+            mb.push_default(StyleProperty::FontFamily(FontFamily::Single(
+                FontFamilyName::Generic(GenericFamily::Monospace),
+            )));
+            mb.push_default(StyleProperty::FontSize(18.0));
+            let mut ml = mb.build(probe);
+            ml.break_all_lines(None);
+            (ml.width() as f64 / 10.0, ml.height() as f64)
+        };
+
         // 对 pane tree 中的所有 pane 计算布局
         let area = Rect::new(0.0, 0.0, available_size.width, available_size.height);
         let layouts = tab.pane_tree.layout(area);
@@ -47,8 +57,8 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
 
         for (pane_id, rect) in &layouts {
             if available_size.width > 0.0 && available_size.height > 0.0 {
-                let new_cols = (rect.width / CELL_WIDTH).floor() as u16;
-                let new_rows = (rect.height / CELL_HEIGHT).floor() as u16;
+                let new_cols = (rect.width / cell_w).floor() as u16;
+                let new_rows = (rect.height / cell_h).floor() as u16;
                 let new_cols = new_cols.max(2);
                 let new_rows = new_rows.max(2);
 
