@@ -389,4 +389,18 @@ impl App {
         }
         needs_redraw
     }
+
+    /// Scroll the active terminal pane by delta_lines (positive = scroll up into history, negative = scroll down)
+    pub fn scroll_terminal(&mut self, delta_lines: i32) {
+        if let Some(group) = self.groups.get_mut(self.active_group_index) {
+            if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
+                if let Some((_pane, pane_state)) = tab.pane_tree.find_mut(tab.active_pane_id) {
+                    let new_offset = pane_state.scroll_offset as i32 + delta_lines;
+                    pane_state.scroll_offset = new_offset.max(0) as usize;
+                    // Force a redraw
+                    self.redraw_counter += 1;
+                }
+            }
+        }
+    }
 }

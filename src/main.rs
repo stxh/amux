@@ -30,18 +30,27 @@ const BLUE: Color = Color::from_rgba8(0x89, 0xb4, 0xfa, 0xff);
 const TEAL: Color = Color::from_rgba8(0x94, 0xe2, 0xd5, 0xff);
 
 fn sidebar_item(idx: usize, text: String, is_active: bool, is_plus: bool) -> impl WidgetView<App> + use<> {
-    let mut l = label(text);
-    if is_active {
-        // We can't easily style the button background in simple xilem, but we can style the label text
-        l = l.weight(xilem::masonry::parley::style::FontWeight::BOLD);
-    }
-    crate::terminal_keyboard::focusless_button(l, move |data: &mut App| {
-        if is_plus {
-            data.add_group();
-        } else {
-            data.switch_group(idx);
-        }
-    })
+    let bg = if is_active {
+        SURFACE0
+    } else {
+        Color::from_rgba8(0x00, 0x00, 0x00, 0x00) // transparent
+    };
+    let l = if is_active {
+        label(text).weight(xilem::masonry::parley::style::FontWeight::BOLD)
+    } else {
+        label(text)
+    };
+    sized_box(
+        crate::terminal_keyboard::focusless_button(l, move |data: &mut App| {
+            if is_plus {
+                data.add_group();
+            } else {
+                data.switch_group(idx);
+            }
+        })
+    )
+    .background(bg)
+    .padding(4.0)
 }
 
 /// Left sidebar - vertical group toolbar (compact, icon-based)
@@ -55,14 +64,21 @@ fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
     items.push(sidebar_item(999, "+".to_string(), false, true));
 
     // Settings button
-    let settings_btn = crate::terminal_keyboard::focusless_button(label("⚙"), |data: &mut App| {
-        data.status_message = "Settings not implemented yet".to_string();
-    });
+    let settings_btn = sized_box(
+        crate::terminal_keyboard::focusless_button(label("S"), |data: &mut App| {
+            data.status_message = "Settings not implemented yet".to_string();
+        })
+    ).padding(4.0);
 
-    flex_col((
-        flex_col(items).flex(1.0),
-        settings_btn,
-    ))
+    sized_box(
+        flex_col((
+            flex_col(items).flex(1.0),
+            settings_btn,
+        ))
+    )
+    .fixed_width(Length::px(48.0))
+    .background(MANTLE)
+    .padding(4.0)
 }
 
 fn tab_item(idx: usize, text: String, is_active: bool) -> impl WidgetView<App> + use<> {
@@ -79,7 +95,7 @@ fn tab_item(idx: usize, text: String, is_active: bool) -> impl WidgetView<App> +
             data.switch_tab(idx);
         })
         .padding(0.0), 
-        crate::terminal_keyboard::focusless_button(label("✕"), move |data: &mut App| {
+        crate::terminal_keyboard::focusless_button(label("x").text_size(11.0), move |data: &mut App| {
             data.remove_tab_at(idx);
         })
         .padding(0.0),
@@ -119,6 +135,8 @@ fn tab_bar(state: &App) -> impl WidgetView<App> + use<> {
         add_tab_btn,
         prefix_indicator,
     ))
+    .background(MANTLE)
+    .padding(2.0)
 }
 
 /// VSCode style status bar
@@ -168,13 +186,21 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
     );
 
     let terminal_area = terminal_view::terminal_canvas_view(data.redraw_counter);
-    let keyboard_capture = crate::terminal_keyboard::terminal_keyboard_view(|state: &mut App, action: crate::terminal_keyboard::KeyAction| {
-        println!("DEBUG: Key received: key='{}', ctrl={}, alt={}, shift={}", action.key, action.ctrl, action.alt, action.shift);
-        if !action.key.is_empty() {
-            state.handle_raw_key_event(&action.key, action.ctrl, action.alt, action.shift);
-            true
-        } else {
-            false
+    let keyboard_capture = crate::terminal_keyboard::terminal_keyboard_view(|state: &mut App, action: crate::terminal_keyboard::TerminalAction| {
+        match action {
+            crate::terminal_keyboard::TerminalAction::Key(key_action) => {
+                println!("DEBUG: Key received: key='{}', ctrl={}, alt={}, shift={}", key_action.key, key_action.ctrl, key_action.alt, key_action.shift);
+                if !key_action.key.is_empty() {
+                    state.handle_raw_key_event(&key_action.key, key_action.ctrl, key_action.alt, key_action.shift);
+                    true
+                } else {
+                    false
+                }
+            }
+            crate::terminal_keyboard::TerminalAction::Scroll { delta_lines } => {
+                state.scroll_terminal(delta_lines);
+                true
+            }
         }
     });
 
@@ -188,11 +214,10 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
         status_bar(data),
     )).cross_axis_alignment(CrossAxisAlignment::Stretch);
 
-    // Root layout: sidebar | content | gap
+    // Root layout: sidebar | content
     let main_view = flex_row((
         sidebar(data),
         content.flex(1.0),
-        sized_box(label("")).fixed_width(Length::px(8.0)), // right gap
     )).cross_axis_alignment(CrossAxisAlignment::Stretch);
 
     fork(main_view, Some(_redraw_trigger))

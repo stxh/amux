@@ -9,7 +9,7 @@
 use xilem::masonry::core::{
     Widget, EventCtx, PropertiesMut, PropertiesRef, TextEvent, PointerEvent,
     RegisterCtx, LayoutCtx, MeasureCtx, PaintCtx, AccessCtx, ChildrenIds,
-    WidgetPod, NewWidget, WidgetMut, AccessEvent
+    WidgetPod, NewWidget, WidgetMut, AccessEvent, PointerScrollEvent,
 };
 use xilem::masonry::kurbo::{Size, Axis};
 use xilem::masonry::imaging::Painter;
@@ -28,6 +28,12 @@ pub struct KeyAction {
     pub shift: bool,
 }
 
+#[derive(Debug, Clone)]
+pub enum TerminalAction {
+    Key(KeyAction),
+    Scroll { delta_lines: i32 },
+}
+
 pub struct TerminalKeyboardWidget;
 
 impl TerminalKeyboardWidget {
@@ -37,7 +43,7 @@ impl TerminalKeyboardWidget {
 }
 
 impl Widget for TerminalKeyboardWidget {
-    type Action = KeyAction;
+    type Action = TerminalAction;
 
     /// Allow this widget to receive focus
     fn accepts_focus(&self) -> bool {
@@ -49,16 +55,37 @@ impl Widget for TerminalKeyboardWidget {
         true
     }
 
-    /// Handle keyboard events - this is where the magic happens
+    /// Handle pointer events including click-to-focus and mouse wheel scroll
     fn on_pointer_event(
         &mut self,
         ctx: &mut EventCtx<'_>,
         _props: &mut PropertiesMut<'_>,
         event: &PointerEvent,
     ) {
-        if let PointerEvent::Down(..) = event {
-            println!("DEBUG: TerminalKeyboardWidget clicked, requesting focus");
-            ctx.request_focus();
+        match event {
+            PointerEvent::Down(..) => {
+                println!("DEBUG: TerminalKeyboardWidget clicked, requesting focus");
+                ctx.request_focus();
+            }
+            PointerEvent::Scroll(PointerScrollEvent { delta, .. }) => {
+                use xilem::masonry::core::ScrollDelta;
+                let lines = match delta {
+                    ScrollDelta::LineDelta(_x, y) => -*y as i32,
+                    ScrollDelta::PixelDelta(pos) => {
+                        // Approximate: 40px per line
+                        -(pos.y / 40.0) as i32
+                    }
+                    ScrollDelta::PageDelta(_x, y) => {
+                        // Page scroll: treat as ~20 lines per page
+                        -(*y as i32) * 20
+                    }
+                };
+                if lines != 0 {
+                    ctx.submit_action::<TerminalAction>(TerminalAction::Scroll { delta_lines: lines });
+                    ctx.set_handled();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -134,7 +161,7 @@ impl Widget for TerminalKeyboardWidget {
                         shift: mods_dbg.contains("SHIFT"),
                     };
                     println!("DEBUG: TerminalKeyboardWidget captured: {:?}", action);
-                    ctx.submit_action::<KeyAction>(action);
+                    ctx.submit_action::<TerminalAction>(TerminalAction::Key(action));
                 }
             }
             _ => {}
@@ -199,7 +226,7 @@ pub struct TerminalKeyboardView<F> {
 
 pub fn terminal_keyboard_view<F>(on_key: F) -> TerminalKeyboardView<F>
 where
-    F: Fn(&mut App, KeyAction) -> bool + Send + Sync + 'static,
+    F: Fn(&mut App, TerminalAction) -> bool + Send + Sync + 'static,
 {
     TerminalKeyboardView { on_key }
 }
@@ -208,7 +235,7 @@ impl<F> xilem::core::ViewMarker for TerminalKeyboardView<F> {}
 
 impl<F> xilem::core::View<App, (), xilem::ViewCtx> for TerminalKeyboardView<F>
 where
-    F: Fn(&mut App, KeyAction) -> bool + Send + Sync + 'static,
+    F: Fn(&mut App, TerminalAction) -> bool + Send + Sync + 'static,
 {
     type Element = xilem::Pod<TerminalKeyboardWidget>;
     type ViewState = ();
@@ -247,7 +274,7 @@ where
         _element: xilem::core::Mut<'_, Self::Element>,
         app_state: &mut App,
     ) -> xilem::core::MessageResult<()> {
-        if let Some(action) = message.take_message::<KeyAction>() {
+        if let Some(action) = message.take_message::<TerminalAction>() {
             if (self.on_key)(app_state, *action) {
                 // Handled
             }

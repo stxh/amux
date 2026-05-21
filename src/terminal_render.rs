@@ -161,6 +161,10 @@ pub fn render_terminal_with_offset(
         let line_num = row_idx as i32 - display_offset as i32;
         let line = Line(line_num);
 
+        // Compute cursor row match once per row
+        let cursor_screen_row = cursor_line_abs + display_offset as i32;
+        let is_cursor_row = cursor_screen_row == row_idx as i32;
+
         // Skip lines that are out of bounds
         if line_num < grid.topmost_line().0 {
             continue;
@@ -199,8 +203,7 @@ pub fn render_terminal_with_offset(
             };
 
             // If this is the cursor cell, invert colors (cursor bg is TEXT, text fg is CRUST)
-            let cursor_screen_row = cursor_line_abs + display_offset as i32;
-            if is_active && cursor_screen_row == row_idx as i32 && col_idx == cursor_col {
+            if is_active && is_cursor_row && col_idx == cursor_col {
                 fg_color = colors::CRUST;
             }
 
@@ -242,13 +245,10 @@ pub fn render_terminal_with_offset(
             }
         }
 
-        // Draw cursor block for this row before text
-        let cursor_screen_row = cursor_line_abs + display_offset as i32;
-        let is_cursor_row = cursor_screen_row == row_idx as i32;
+        // Draw cursor block for this row before text (use row y for consistent positioning)
         if is_active && is_cursor_row && cursor_col < cols as usize {
-            let cursor_y = offset_y + cursor_screen_row as f64 * cell_h;
             let cursor_x = offset_x + cursor_col as f64 * cell_w;
-            let cursor_rect = Rect::new(cursor_x, cursor_y, cursor_x + cell_w, cursor_y + cell_h);
+            let cursor_rect = Rect::new(cursor_x, y, cursor_x + cell_w, y + cell_h);
             painter.fill(&cursor_rect, colors::TEXT).draw();
         }
 
@@ -298,13 +298,30 @@ pub fn render_terminal_with_offset(
     let border = Stroke::new(2.0);
     painter.stroke(&rect, &border, border_color).draw();
 
-    // Scroll indicator
-    if pane_state.scroll_offset > 0 {
-        let scroll_pct = pane_state.scroll_offset as f64 / total_lines as f64;
-        let indicator_h = (size.height * 0.1).max(20.0);
-        let indicator_y = offset_y + size.height * (1.0 - scroll_pct) - indicator_h;
-        let indicator_rect = Rect::new(offset_x + size.width - 6.0, indicator_y, offset_x + size.width - 2.0, indicator_y + indicator_h);
-        painter.fill(&indicator_rect, colors::SURFACE1).draw();
+    // Scrollbar — always visible track with proportional thumb
+    {
+        let track_width = 8.0;
+        let track_x = offset_x + size.width - track_width - 1.0;
+        let track_rect = Rect::new(track_x, offset_y, track_x + track_width, offset_y + size.height);
+        // Track background (semi-transparent)
+        painter.fill(&track_rect, Color::from_rgba8(0x18, 0x18, 0x25, 0x80)).draw();
+
+        // Thumb — size proportional to viewport/total, position proportional to scroll offset
+        if total_lines > 0 {
+            let viewport_ratio = (screen_lines as f64 / total_lines as f64).min(1.0);
+            let thumb_h = (size.height * viewport_ratio).max(20.0);
+
+            // Current view position within total scrollable range
+            let max_scroll = (total_lines as isize - screen_lines as isize).max(0) as f64;
+            let scroll_progress = if max_scroll > 0.0 {
+                1.0 - (pane_state.scroll_offset as f64 / max_scroll)
+            } else {
+                1.0
+            };
+            let thumb_y = offset_y + (size.height - thumb_h) * scroll_progress.clamp(0.0, 1.0);
+            let thumb_rect = Rect::new(track_x + 1.0, thumb_y, track_x + track_width - 1.0, thumb_y + thumb_h);
+            painter.fill(&thumb_rect, colors::SURFACE1).draw();
+        }
     }
 }
 
