@@ -155,13 +155,10 @@ impl Terminal {
                             println!("DEBUG: PTY reader thread read 0 bytes (EOF). Exiting loop.");
                             break;
                         }
-                        Err(e) => {
-                            println!("DEBUG: PTY reader thread read error: {:?}. Exiting loop.", e);
+                        Err(_e) => {
                             break;
                         }
                         Ok(bytes_read) => {
-                            let text = String::from_utf8_lossy(&buf[..bytes_read]);
-                            println!("DEBUG: PTY reader thread read {} bytes: {:?}", bytes_read, text);
                             // Parse PTY bytes through VTE parser
                             // This correctly handles ANSI escape sequences
                             if let Ok(mut term) = term_clone.lock() {
@@ -169,15 +166,22 @@ impl Terminal {
                                     parser.advance(&mut *term, *byte);
                                 }
                             }
-                            *needs_redraw.lock().unwrap() = true;
-                            if let Some(proxy) = &*redraw_notifier.lock().unwrap() {
-                                let _ = proxy.message(());
+                            // Coalesce redraw trigger: only send message if needs_redraw was false
+                            let already_pending = {
+                                let mut needs = needs_redraw.lock().unwrap();
+                                let prev = *needs;
+                                *needs = true;
+                                prev
+                            };
+                            if !already_pending {
+                                if let Some(proxy) = &*redraw_notifier.lock().unwrap() {
+                                    let _ = proxy.message(());
+                                }
                             }
                         }
                     }
                 }
             }
-            println!("DEBUG: PTY reader thread stopped.");
         });
 
         Ok(())

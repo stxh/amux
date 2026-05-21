@@ -258,7 +258,7 @@ pub fn render_terminal_with_offset(
         // Draw cursor block for this row before text (use row y for consistent positioning)
         if is_active && is_cursor_row && cursor_col < cols as usize {
             let cursor_x = offset_x + cursor_col as f64 * cell_w;
-            let cursor_rect = Rect::new(cursor_x, y, cursor_x + cell_w, y + cell_h);
+            let cursor_rect = Rect::new(cursor_x, y + 14.0, cursor_x + cell_w, y + 14.0 + cell_h);
             painter.fill(&cursor_rect, colors::TEXT).draw();
         }
 
