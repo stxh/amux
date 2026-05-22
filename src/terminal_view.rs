@@ -55,10 +55,12 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
         // 收集需要 resize 的 pane（先收集，避免借用冲突）
         let mut pending: Vec<(usize, u16, u16)> = Vec::new();
 
+        const MARGIN: f64 = 12.0;
+
         for (pane_id, rect) in &layouts {
             if available_size.width > 0.0 && available_size.height > 0.0 {
-                let new_cols = (rect.width / cell_w).floor() as u16;
-                let new_rows = (rect.height / cell_h).floor() as u16;
+                let new_cols = ((rect.width - 2.0 * MARGIN).max(0.0) / cell_w).floor() as u16;
+                let new_rows = ((rect.height - 2.0 * MARGIN).max(0.0) / cell_h).floor() as u16;
                 let new_cols = new_cols.max(2);
                 let new_rows = new_rows.max(2);
 

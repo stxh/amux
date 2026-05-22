@@ -85,7 +85,10 @@ impl Widget for TerminalKeyboardWidget {
                     ctx.set_handled();
                 }
             }
-            _ => {}
+            _ => {
+                // Request focus on pointer move, hover, or enter to guarantee automatic, click-free focus
+                ctx.request_focus();
+            }
         }
     }
 
@@ -114,6 +117,16 @@ impl Widget for TerminalKeyboardWidget {
                     MasonryKey::Character(s) => {
                         if s == " " {
                             "space".to_string()
+                        } else if s.chars().count() == 1 {
+                            let c = s.chars().next().unwrap();
+                            let val = c as u32;
+                            if val >= 1 && val <= 26 {
+                                // Map control character back to 'a'..='z'
+                                let mapped = ((val - 1) + 'a' as u32) as u8 as char;
+                                mapped.to_string()
+                            } else {
+                                s.to_string()
+                            }
                         } else {
                             s.to_string()
                         }
@@ -154,9 +167,19 @@ impl Widget for TerminalKeyboardWidget {
                 if !key_str.is_empty() {
                     let modifiers = key_event.modifiers;
                     let mods_dbg = format!("{:?}", modifiers).to_uppercase();
+                    
+                    // Check if it was originally a control character code
+                    let is_control_char = match &key_event.key {
+                        MasonryKey::Character(s) if s.chars().count() == 1 => {
+                            let val = s.chars().next().unwrap() as u32;
+                            val >= 1 && val <= 26
+                        }
+                        _ => false,
+                    };
+
                     let action = KeyAction {
                         key: key_str,
-                        ctrl: mods_dbg.contains("CONTROL") || mods_dbg.contains("CTRL"),
+                        ctrl: is_control_char || mods_dbg.contains("CONTROL") || mods_dbg.contains("CTRL"),
                         alt: mods_dbg.contains("ALT"),
                         shift: mods_dbg.contains("SHIFT"),
                     };

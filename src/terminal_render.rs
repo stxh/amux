@@ -129,6 +129,8 @@ pub fn render_terminal_with_offset(
     fcx: &mut xilem::masonry::parley::FontContext,
     lcx: &mut xilem::masonry::parley::LayoutContext<xilem::masonry::core::BrushIndex>,
 ) {
+    const MARGIN: f64 = 12.0;
+
     // Background for this pane
     let rect = Rect::new(offset_x, offset_y, offset_x + size.width, offset_y + size.height);
     painter.fill(&rect, colors::CRUST).draw();
@@ -162,12 +164,12 @@ pub fn render_terminal_with_offset(
     };
 
     // Calculate how many rows we can actually display
-    let max_displayable_rows = (size.height / cell_h).floor() as usize;
+    let max_displayable_rows = ((size.height - 2.0 * MARGIN).max(0.0) / cell_h).floor() as usize;
     let display_lines = screen_lines.min(max_displayable_rows);
 
     // Render visible rows
     for row_idx in 0..display_lines {
-        let y = offset_y + row_idx as f64 * cell_h;
+        let y = offset_y + MARGIN + row_idx as f64 * cell_h;
         let line_num = row_idx as i32 - display_offset as i32;
         let line = Line(line_num);
 
@@ -232,7 +234,7 @@ pub fn render_terminal_with_offset(
             }
 
             if cell.bg != TermColor::Named(NamedColor::Background) {
-                let x = offset_x + col_idx as f64 * cell_w;
+                let x = offset_x + MARGIN + col_idx as f64 * cell_w;
                 let bg_color = term_color_to_peniko(cell.bg);
                 let cell_rect = Rect::new(x, y, x + cell_w, y + cell_h);
                 painter.fill(&cell_rect, bg_color).draw();
@@ -240,7 +242,7 @@ pub fn render_terminal_with_offset(
 
             // Underline
             if cell.flags.contains(Flags::UNDERLINE) {
-                let x = offset_x + col_idx as f64 * cell_w;
+                let x = offset_x + MARGIN + col_idx as f64 * cell_w;
                 let fg_color = term_color_to_peniko(cell.fg);
                 let ul_rect = Rect::new(x, y + cell_h - 2.0, x + cell_w, y + cell_h);
                 painter.fill(&ul_rect, fg_color).draw();
@@ -248,7 +250,7 @@ pub fn render_terminal_with_offset(
 
             // Strikethrough
             if cell.flags.contains(Flags::STRIKEOUT) {
-                let x = offset_x + col_idx as f64 * cell_w;
+                let x = offset_x + MARGIN + col_idx as f64 * cell_w;
                 let fg_color = term_color_to_peniko(cell.fg);
                 let strike_rect = Rect::new(x, y + cell_h / 2.0 - 1.0, x + cell_w, y + cell_h / 2.0 + 1.0);
                 painter.fill(&strike_rect, fg_color).draw();
@@ -257,7 +259,7 @@ pub fn render_terminal_with_offset(
 
         // Draw cursor block for this row before text (use row y for consistent positioning)
         if is_active && is_cursor_row && cursor_col < cols as usize {
-            let cursor_x = offset_x + cursor_col as f64 * cell_w;
+            let cursor_x = offset_x + MARGIN + cursor_col as f64 * cell_w;
             let cursor_rect = Rect::new(cursor_x, y + 14.0, cursor_x + cell_w, y + 14.0 + cell_h);
             painter.fill(&cursor_rect, colors::TEXT).draw();
         }
@@ -298,7 +300,7 @@ pub fn render_terminal_with_offset(
 
             // Position baseline
             let text_y_base = y + cell_h * 0.78;
-            let transform = Affine::translate((offset_x, text_y_base));
+            let transform = Affine::translate((offset_x + MARGIN, text_y_base));
 
             render_text(painter, transform, &layout, &brushes, true);
         }
@@ -311,15 +313,16 @@ pub fn render_terminal_with_offset(
     // Scrollbar — always visible track with proportional thumb
     {
         let track_width = 8.0;
-        let track_x = offset_x + size.width - track_width - 1.0;
-        let track_rect = Rect::new(track_x, offset_y, track_x + track_width, offset_y + size.height);
+        let track_x = offset_x + size.width - track_width - MARGIN;
+        let track_rect = Rect::new(track_x, offset_y + MARGIN, track_x + track_width, offset_y + size.height - MARGIN);
         // Track background (semi-transparent)
         painter.fill(&track_rect, Color::from_rgba8(0x18, 0x18, 0x25, 0x80)).draw();
 
         // Thumb — size proportional to viewport/total, position proportional to scroll offset
         if total_lines > 0 {
+            let scrollable_h = size.height - 2.0 * MARGIN;
             let viewport_ratio = (screen_lines as f64 / total_lines as f64).min(1.0);
-            let thumb_h = (size.height * viewport_ratio).max(20.0);
+            let thumb_h = (scrollable_h * viewport_ratio).max(20.0);
 
             // Current view position within total scrollable range
             let max_scroll = (total_lines as isize - screen_lines as isize).max(0) as f64;
@@ -328,7 +331,7 @@ pub fn render_terminal_with_offset(
             } else {
                 1.0
             };
-            let thumb_y = offset_y + (size.height - thumb_h) * scroll_progress.clamp(0.0, 1.0);
+            let thumb_y = offset_y + MARGIN + (scrollable_h - thumb_h) * scroll_progress.clamp(0.0, 1.0);
             let thumb_rect = Rect::new(track_x + 1.0, thumb_y, track_x + track_width - 1.0, thumb_y + thumb_h);
             painter.fill(&thumb_rect, colors::SURFACE1).draw();
         }
