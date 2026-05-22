@@ -1,6 +1,6 @@
 [package]
 name = "amux"
-version = "0.0.8"
+version = "0.0.9"
 edition = "2021"
 description = "A cross-platform terminal multiplexer combining Alacritty terminal backend with Xilem/Vello GPU-accelerated rendering"
 
@@ -26,3 +26,7 @@ skrifa = "0.40"
 tokio = { version = "1", features = ["time", "rt"] }
 # Event handling
 winit = "0.30"
+notify-rust = "4"
+copypasta = "0.10.2"
+
+

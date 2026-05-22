@@ -62,15 +62,37 @@ pub struct Terminal {
     event_receiver: mpsc::Receiver<alacritty_terminal::event::Event>,
     needs_redraw: Arc<Mutex<bool>>,
     pub redraw_notifier: Arc<Mutex<Option<xilem::core::MessageProxy<()>>>>,
+    pub title: Arc<Mutex<Option<String>>>,
 }
 
 /// Event listener for terminal state changes
 pub struct TerminalEventListener {
     sender: Option<mpsc::Sender<alacritty_terminal::event::Event>>,
+    title: Arc<Mutex<Option<String>>>,
+    redraw_notifier: Arc<Mutex<Option<xilem::core::MessageProxy<()>>>>,
 }
 
 impl alacritty_terminal::event::EventListener for TerminalEventListener {
     fn send_event(&self, event: alacritty_terminal::event::Event) {
+        match &event {
+            alacritty_terminal::event::Event::Title(t) => {
+                if let Ok(mut title) = self.title.lock() {
+                    *title = Some(t.clone());
+                }
+                if let Some(proxy) = &*self.redraw_notifier.lock().unwrap() {
+                    let _ = proxy.message(());
+                }
+            }
+            alacritty_terminal::event::Event::ResetTitle => {
+                if let Ok(mut title) = self.title.lock() {
+                    *title = None;
+                }
+                if let Some(proxy) = &*self.redraw_notifier.lock().unwrap() {
+                    let _ = proxy.message(());
+                }
+            }
+            _ => {}
+        }
         if let Some(sender) = &self.sender {
             let _ = sender.send(event);
         }
@@ -86,9 +108,13 @@ impl Terminal {
 
         let (event_sender, event_receiver) = mpsc::channel();
         let needs_redraw = Arc::new(Mutex::new(false));
+        let title = Arc::new(Mutex::new(None));
+        let redraw_notifier = Arc::new(Mutex::new(None));
 
         let listener = TerminalEventListener {
             sender: Some(event_sender),
+            title: title.clone(),
+            redraw_notifier: redraw_notifier.clone(),
         };
 
         let term = Term::new(
@@ -106,7 +132,8 @@ impl Terminal {
             config: config.clone(),
             event_receiver,
             needs_redraw,
-            redraw_notifier: Arc::new(Mutex::new(None)),
+            redraw_notifier,
+            title,
         }
     }
 
@@ -142,23 +169,29 @@ impl Terminal {
         let redraw_notifier = self.redraw_notifier.clone();
 
         thread::spawn(move || {
-            println!("DEBUG: PTY reader thread started!");
+            // println!("DEBUG: PTY reader thread started!");
             if let Some(mut reader) = reader {
                 let mut buf = [0u8; 4096];
                 // Create VTE parser - this parses ANSI escape sequences and calls
                 // the appropriate methods on the terminal (input, execute, etc.)
                 let mut parser: Processor<alacritty_terminal::vte::ansi::StdSyncHandler> = Processor::new();
+                let mut osc_parser = OscNotificationParser::new();
 
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) => {
-                            println!("DEBUG: PTY reader thread read 0 bytes (EOF). Exiting loop.");
+                            // println!("DEBUG: PTY reader thread read 0 bytes (EOF). Exiting loop.");
                             break;
                         }
                         Err(_e) => {
                             break;
                         }
                         Ok(bytes_read) => {
+                            // Process bytes through OSC parser for notifications
+                            for byte in &buf[..bytes_read] {
+                                osc_parser.advance(*byte);
+                            }
+
                             // Parse PTY bytes through VTE parser
                             // This correctly handles ANSI escape sequences
                             if let Ok(mut term) = term_clone.lock() {
@@ -202,6 +235,11 @@ impl Terminal {
         let val = *needs;
         *needs = false;
         val
+    }
+
+    /// Get the active terminal shell title
+    pub fn title(&self) -> Option<String> {
+        self.title.lock().unwrap().clone()
     }
 
     /// Get a copy of the terminal grid for rendering
@@ -263,4 +301,176 @@ impl Terminal {
         let grid = term.grid();
         grid.cursor.point
     }
+
+    /// Check if cell at (line, col) is in selection
+    pub fn is_cell_selected(&self, line: i32, col: usize) -> bool {
+        let term = self.term.lock().unwrap();
+        if let Some(selection) = &term.selection {
+            use alacritty_terminal::index::{Point, Column, Line};
+            if let Some(range) = selection.to_range(&*term) {
+                range.contains(Point::new(Line(line), Column(col)))
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Clear selection
+    pub fn clear_selection(&self) {
+        let mut term = self.term.lock().unwrap();
+        term.selection = None;
+    }
+
+    /// Start a new selection
+    pub fn start_selection(&self, line: i32, col: usize) {
+        use alacritty_terminal::index::{Point, Column, Line, Side};
+        use alacritty_terminal::selection::{Selection, SelectionType};
+        let mut term = self.term.lock().unwrap();
+        let point = Point::new(Line(line), Column(col));
+        term.selection = Some(Selection::new(SelectionType::Simple, point, Side::Left));
+    }
+
+    /// Update selection end point
+    pub fn update_selection(&self, line: i32, col: usize) {
+        use alacritty_terminal::index::{Point, Column, Line, Side};
+        let mut term = self.term.lock().unwrap();
+        if let Some(selection) = &mut term.selection {
+            let point = Point::new(Line(line), Column(col));
+            selection.update(point, Side::Right);
+        }
+    }
+
+    /// Convert selection to string
+    pub fn selection_to_string(&self) -> Option<String> {
+        let term = self.term.lock().unwrap();
+        term.selection_to_string()
+    }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParserState {
+    Ground,
+    Esc,
+    Osc,
+    OscEsc,
+}
+
+struct OscNotificationParser {
+    state: ParserState,
+    buffer: Vec<u8>,
+}
+
+impl OscNotificationParser {
+    fn new() -> Self {
+        Self {
+            state: ParserState::Ground,
+            buffer: Vec::new(),
+        }
+    }
+
+    fn advance(&mut self, byte: u8) {
+        match self.state {
+            ParserState::Ground => {
+                if byte == 0x1b {
+                    self.state = ParserState::Esc;
+                } else if byte == 0x9d {
+                    self.buffer.clear();
+                    self.state = ParserState::Osc;
+                }
+            }
+            ParserState::Esc => {
+                if byte == 0x5d {
+                    self.buffer.clear();
+                    self.state = ParserState::Osc;
+                } else {
+                    self.state = ParserState::Ground;
+                }
+            }
+            ParserState::Osc => {
+                if byte == 0x07 {
+                    self.handle_osc();
+                    self.state = ParserState::Ground;
+                } else if byte == 0x1b {
+                    self.state = ParserState::OscEsc;
+                } else {
+                    self.buffer.push(byte);
+                }
+            }
+            ParserState::OscEsc => {
+                if byte == 0x5c {
+                    self.handle_osc();
+                    self.state = ParserState::Ground;
+                } else {
+                    self.buffer.push(0x1b);
+                    self.buffer.push(byte);
+                    self.state = ParserState::Osc;
+                }
+            }
+        }
+    }
+
+    fn handle_osc(&mut self) {
+        let payload_str = match std::str::from_utf8(&self.buffer) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let mut title = String::new();
+        let mut body = String::new();
+        let mut triggered = false;
+
+        if payload_str.starts_with("9;") {
+            title = "amux".to_string();
+            body = payload_str["9;".len()..].to_string();
+            triggered = true;
+        } else if payload_str.starts_with("777;notify;") {
+            let payload = &payload_str["777;notify;".len()..];
+            let parts: Vec<&str> = payload.split(';').collect();
+            if parts.len() >= 2 {
+                title = parts[0].trim().to_string();
+                body = parts[1].trim().to_string();
+            } else if parts.len() == 1 {
+                title = "amux".to_string();
+                body = parts[0].trim().to_string();
+            }
+            triggered = true;
+        } else if payload_str.starts_with("99;") {
+            let payload = &payload_str["99;".len()..];
+            let parts: Vec<&str> = payload.split(';').collect();
+            for part in parts {
+                let part = part.trim();
+                // Skip options like i=, d=, p=, a=
+                if part.contains('=') && (part.starts_with("i=") || part.starts_with("d=") || part.starts_with("p=") || part.starts_with("a=")) {
+                    continue;
+                }
+                if title.is_empty() {
+                    title = part.to_string();
+                } else if body.is_empty() {
+                    body = part.to_string();
+                } else {
+                    body.push_str("; ");
+                    body.push_str(part);
+                }
+            }
+            if body.is_empty() && !title.is_empty() {
+                body = title;
+                title = "amux".to_string();
+            }
+            triggered = true;
+        }
+
+        if triggered && !body.is_empty() {
+            let title = if title.is_empty() { "amux".to_string() } else { title };
+            std::thread::spawn(move || {
+                let _ = notify_rust::Notification::new()
+                    .summary(&title)
+                    .body(&body)
+                    .appname("amux")
+                    .show();
+            });
+        }
+    }
+}
+

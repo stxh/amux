@@ -130,7 +130,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     pub fn process_key(&mut self, state: winit::event::ElementState, key: winit::keyboard::Key, text: Option<String>) {
-        eprintln!("[amux] Processor::process_key state={state:?} key={key:?} text={text:?}");
+        // eprintln!("[amux] Processor::process_key state={state:?} key={key:?} text={text:?}");
         if state == winit::event::ElementState::Released {
             return;
         }
@@ -141,10 +141,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         // Build sequence or use raw text
         let bytes = if self.should_build_sequence(&key, text_str, mode, mods) {
-            eprintln!("[amux] Processor: building sequence for key={key:?}");
+            // eprintln!("[amux] Processor: building sequence for key={key:?}");
             self.build_sequence(key, mods, mode)
         } else {
-            eprintln!("[amux] Processor: using raw text text_str={text_str:?}");
+            // eprintln!("[amux] Processor: using raw text text_str={text_str:?}");
             let mut bytes = Vec::with_capacity(text_str.len() + 1);
             if mods.alt_key() {
                 bytes.push(b'\x1b');
@@ -152,7 +152,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             bytes.extend_from_slice(text_str.as_bytes());
             bytes
         };
-        eprintln!("[amux] Processor: bytes to send: {bytes:?}");
+        // eprintln!("[amux] Processor: bytes to send: {bytes:?}");
         self.ctx.write_to_pty(bytes);
     }
 

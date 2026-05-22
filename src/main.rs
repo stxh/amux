@@ -9,6 +9,71 @@ mod terminal_keyboard;
 mod terminal_render;
 mod terminal_view;
 
+#[cfg(target_os = "windows")]
+pub mod win_util {
+    use std::ffi::c_void;
+
+    extern "system" {
+        fn GetActiveWindow() -> *mut c_void;
+        fn ReleaseCapture() -> i32;
+        fn SendMessageA(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> isize;
+        fn ShowWindow(hwnd: *mut c_void, cmd_show: i32) -> i32;
+        fn IsZoomed(hwnd: *mut c_void) -> i32;
+    }
+
+    const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+    const HTCAPTION: usize = 2;
+    const SW_MINIMIZE: i32 = 6;
+    const SW_MAXIMIZE: i32 = 3;
+    const SW_RESTORE: i32 = 9;
+
+    pub fn drag_active_window() {
+        unsafe {
+            let hwnd = GetActiveWindow();
+            if !hwnd.is_null() {
+                ReleaseCapture();
+                SendMessageA(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            }
+        }
+    }
+
+    pub fn minimize_active_window() {
+        unsafe {
+            let hwnd = GetActiveWindow();
+            if !hwnd.is_null() {
+                ShowWindow(hwnd, SW_MINIMIZE);
+            }
+        }
+    }
+
+    pub fn maximize_active_window() {
+        unsafe {
+            let hwnd = GetActiveWindow();
+            if !hwnd.is_null() {
+                if IsZoomed(hwnd) != 0 {
+                    ShowWindow(hwnd, SW_RESTORE);
+                } else {
+                    ShowWindow(hwnd, SW_MAXIMIZE);
+                }
+            }
+        }
+    }
+
+    pub fn close_active_window() {
+        std::process::exit(0);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub mod win_util {
+    pub fn drag_active_window() {}
+    pub fn minimize_active_window() {}
+    pub fn maximize_active_window() {}
+    pub fn close_active_window() {
+        std::process::exit(0);
+    }
+}
+
 use app::App;
 use xilem::core::fork;
 use xilem::view::{flex_col, label, flex_row, sized_box, zstack, task_raw, FlexExt, CrossAxisAlignment};
@@ -21,12 +86,14 @@ use std::time::Duration;
 
 // ─── Catppuccin Mocha Colors ───
 const CRUST: Color = Color::from_rgba8(0x11, 0x11, 0x1b, 0xff);
+#[allow(dead_code)]
 const BASE: Color = Color::from_rgba8(0x1e, 0x1e, 0x2e, 0xff);
 const MANTLE: Color = Color::from_rgba8(0x18, 0x18, 0x25, 0xff);
 const SURFACE0: Color = Color::from_rgba8(0x31, 0x32, 0x44, 0xff);
 const SURFACE1: Color = Color::from_rgba8(0x45, 0x47, 0x5a, 0xff);
 const TEXT_COLOR: Color = Color::from_rgba8(0xc6, 0xd0, 0xf5, 0xff);
 const BLUE: Color = Color::from_rgba8(0x89, 0xb4, 0xfa, 0xff);
+#[allow(dead_code)]
 const TEAL: Color = Color::from_rgba8(0x94, 0xe2, 0xd5, 0xff);
 
 fn sidebar_item(idx: usize, text: String, is_active: bool, is_plus: bool) -> impl WidgetView<App> + use<> {
@@ -54,13 +121,21 @@ fn sidebar_item(idx: usize, text: String, is_active: bool, is_plus: bool) -> imp
 
 /// Left sidebar - vertical group toolbar (VSCode-style activity bar)
 fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
-    let mut items: Vec<_> = state.groups.iter().enumerate().map(|(idx, group)| {
-        let is_active = idx == state.active_group_index;
-        sidebar_item(idx, group.icon.clone(), is_active, false)
-    }).collect();
+    let mut items: Vec<_> = if state.show_sidebar {
+        state.groups.iter().enumerate().map(|(idx, group)| {
+            let is_active = idx == state.active_group_index;
+            sidebar_item(idx, group.icon.clone(), is_active, false)
+        }).collect()
+    } else {
+        Vec::new()
+    };
 
-    // Group Add button
-    items.push(sidebar_item(999, "+".to_string(), false, true));
+    if state.show_sidebar {
+        // Group Add button
+        items.push(sidebar_item(999, "+".to_string(), false, true));
+    }
+
+    let width = if state.show_sidebar { 44.0 } else { 0.0 };
 
     sized_box(
         flex_col((
@@ -69,9 +144,32 @@ fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
                 .flex(1.0),
         ))
     )
-    .fixed_width(Length::px(44.0))
-    .background(CRUST)
-    .padding(2.0)
+    .fixed_width(Length::px(width))
+    .background(if state.show_sidebar { CRUST } else { Color::from_rgba8(0, 0, 0, 0) })
+    .padding(if state.show_sidebar { 2.0 } else { 0.0 })
+}
+
+/// Right sidebar - system monitor panel (toggled via Alt+Ctrl+B)
+fn right_sidebar(state: &App) -> impl WidgetView<App> + use<> {
+    let width = if state.show_right_sidebar { 120.0 } else { 0.0 };
+    let text_color = if state.show_right_sidebar { TEXT_COLOR } else { Color::from_rgba8(0, 0, 0, 0) };
+    let blue_color = if state.show_right_sidebar { BLUE } else { Color::from_rgba8(0, 0, 0, 0) };
+    let surface1_color = if state.show_right_sidebar { SURFACE1 } else { Color::from_rgba8(0, 0, 0, 0) };
+    let spacer_height = if state.show_right_sidebar { 10.0 } else { 0.0 };
+
+    let content = flex_col((
+        label("Right Sidebar").weight(xilem::masonry::parley::style::FontWeight::BOLD).text_size(12.0).color(blue_color),
+        sized_box(label("")).fixed_height(Length::px(spacer_height)),
+        label("System Monitor").text_size(10.0).color(surface1_color),
+        label("CPU: 12%").text_size(11.0).color(text_color),
+        label("MEM: 42%").text_size(11.0).color(text_color),
+    ))
+    .cross_axis_alignment(CrossAxisAlignment::Start);
+
+    sized_box(content)
+        .fixed_width(Length::px(width))
+        .background(if state.show_right_sidebar { CRUST } else { Color::from_rgba8(0, 0, 0, 0) })
+        .padding(if state.show_right_sidebar { 10.0 } else { 0.0 })
 }
 
 fn tab_item(idx: usize, text: String, is_active: bool) -> impl WidgetView<App> + use<> {
@@ -94,7 +192,7 @@ fn tab_item(idx: usize, text: String, is_active: bool) -> impl WidgetView<App> +
         .padding(0.0),
     ))
     .background(bg_color)
-    .padding(8.0)
+    .padding(4.0)
 }
 
 /// Tab bar with active group's tabs
@@ -102,11 +200,25 @@ fn tab_bar(state: &App) -> impl WidgetView<App> + use<> {
     let mut items = Vec::new();
     if let Some(group) = state.groups.get(state.active_group_index) {
         for (idx, tab) in group.tabs.iter().enumerate() {
+            let active_pane_id = tab.active_pane_id;
+            let pane_title = if let Some((pane, _)) = tab.pane_tree.find(active_pane_id) {
+                pane.terminal.title().unwrap_or_else(|| "Terminal".to_string())
+            } else {
+                "Terminal".to_string()
+            };
+
+            let displayed_title = if pane_title.chars().count() > 20 {
+                let truncated: String = pane_title.chars().take(17).collect();
+                format!("{}...", truncated)
+            } else {
+                pane_title
+            };
+
             let pane_count = tab.pane_tree.pane_count();
             let label_text = if pane_count > 1 {
-                format!(" {} [{}] ", tab.name, pane_count)
+                format!(" {} [{}] ", displayed_title, pane_count)
             } else {
-                format!(" {} ", tab.name)
+                format!(" {} ", displayed_title)
             };
             let is_active = idx == group.active_tab_index;
             items.push(tab_item(idx, label_text, is_active));
@@ -123,36 +235,30 @@ fn tab_bar(state: &App) -> impl WidgetView<App> + use<> {
         label("")
     };
 
+    let window_controls = flex_row((
+        crate::terminal_keyboard::focusless_button(label("  -  ").text_size(12.0).color(TEXT_COLOR), |_| {
+            crate::win_util::minimize_active_window();
+        }),
+        crate::terminal_keyboard::focusless_button(label("  +  ").text_size(12.0).color(TEXT_COLOR), |_| {
+            crate::win_util::maximize_active_window();
+        }),
+        crate::terminal_keyboard::focusless_button(label("  x  ").text_size(12.0).color(Color::from_rgba8(243, 139, 168, 255)), |_| {
+            crate::win_util::close_active_window();
+        }),
+    ));
+
     flex_row((
         flex_row(items),
         add_tab_btn,
         prefix_indicator,
+        crate::terminal_keyboard::drag_area().flex(1.0),
+        window_controls,
     ))
     .background(MANTLE)
-    .padding(2.0)
+    .padding(1.0)
 }
 
-/// VSCode style status bar
-fn status_bar(state: &App) -> impl WidgetView<App> + use<> {
-    let left_info = if let Some(g) = state.active_group() {
-        if let Some(t) = g.active_tab() {
-            let (col, row) = state.cursor_pos();
-            format!("Group: {} | Tab: {} | Panes: {} | Cursor: ({}, {})", g.name, t.name, t.pane_count(), col, row)
-        } else {
-            format!("Group: {}", g.name)
-        }
-    } else {
-        "Ready".to_string()
-    };
-    
-    let status = format!("{} | {} | Debug: {}", state.status_message, left_info, state.last_key_info);
-    
-    flex_row((
-        label(status).text_size(12.0).color(Color::WHITE),
-    ))
-    .background(Color::from_rgba8(0x1e, 0x1e, 0x2e, 0xff))
-    .padding(4.0)
-}
+
 
 /// Main application layout
 fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
@@ -161,7 +267,7 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
         |proxy, state: &mut App| {
             state.register_redraw_proxy(proxy.clone());
             async move {
-                println!("DEBUG: task_raw future spawned (now 100% event-driven)!");
+                // println!("DEBUG: task_raw future spawned (now 100% event-driven)!");
                 loop {
                     tokio::time::sleep(Duration::from_secs(3600)).await;
                 }
@@ -172,7 +278,7 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
             let before = state.redraw_counter;
             if state.check_and_clear_redraw() {
                 state.redraw_counter += 1;
-                println!("DEBUG: task_raw check_and_clear_redraw was TRUE! redraw_counter updated from {} to {}", before, state.redraw_counter);
+                // println!("DEBUG: task_raw check_and_clear_redraw was TRUE! redraw_counter updated from {} to {}", before, state.redraw_counter);
             }
             state.apply_pending_resizes();
         },
@@ -182,7 +288,7 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
     let keyboard_capture = crate::terminal_keyboard::terminal_keyboard_view(|state: &mut App, action: crate::terminal_keyboard::TerminalAction| {
         match action {
             crate::terminal_keyboard::TerminalAction::Key(key_action) => {
-                println!("DEBUG: Key received: key='{}', ctrl={}, alt={}, shift={}", key_action.key, key_action.ctrl, key_action.alt, key_action.shift);
+                // println!("DEBUG: Key received: key='{}', ctrl={}, alt={}, shift={}", key_action.key, key_action.ctrl, key_action.alt, key_action.shift);
                 if !key_action.key.is_empty() {
                     state.handle_raw_key_event(&key_action.key, key_action.ctrl, key_action.alt, key_action.shift);
                     true
@@ -192,6 +298,18 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
             }
             crate::terminal_keyboard::TerminalAction::Scroll { delta_lines } => {
                 state.scroll_terminal(delta_lines);
+                true
+            }
+            crate::terminal_keyboard::TerminalAction::MouseDown { x, y, button } => {
+                state.handle_mouse_down(x, y, button);
+                true
+            }
+            crate::terminal_keyboard::TerminalAction::MouseMove { x, y, is_dragging } => {
+                state.handle_mouse_move(x, y, is_dragging);
+                true
+            }
+            crate::terminal_keyboard::TerminalAction::MouseUp { x, y, button } => {
+                state.handle_mouse_up(x, y, button);
                 true
             }
         }
@@ -204,13 +322,13 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
             terminal_area,
             keyboard_capture,
         )).flex(1.0),
-        status_bar(data),
     )).cross_axis_alignment(CrossAxisAlignment::Stretch);
 
-    // Root layout: sidebar | content
+    // Root layout: sidebar | content | right_sidebar
     let main_view = flex_row((
         sidebar(data),
         content.flex(1.0),
+        right_sidebar(data),
     )).cross_axis_alignment(CrossAxisAlignment::Stretch);
 
     fork(main_view, Some(_redraw_trigger))
@@ -222,8 +340,9 @@ fn main() {
     let app = Xilem::new_simple(
         app_state,
         app_logic,
-        WindowOptions::new("amux - Terminal Multiplexer [UI UPDATED]")
-            .with_initial_inner_size(LogicalSize::new(1200.0, 800.0)),
+        WindowOptions::new("amux - Terminal Multiplexer")
+            .with_initial_inner_size(LogicalSize::new(1200.0, 800.0))
+            .with_decorations(false),
     );
 
     app.run_in(EventLoop::with_user_event()).unwrap();

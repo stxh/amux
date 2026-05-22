@@ -233,7 +233,13 @@ pub fn render_terminal_with_offset(
                 continue;
             }
 
-            if cell.bg != TermColor::Named(NamedColor::Background) {
+            let is_selected = terminal.is_cell_selected(line_num, col_idx);
+            if is_selected {
+                let x = offset_x + MARGIN + col_idx as f64 * cell_w;
+                let bg_color = colors::SURFACE1;
+                let cell_rect = Rect::new(x, y, x + cell_w, y + cell_h);
+                painter.fill(&cell_rect, bg_color).draw();
+            } else if cell.bg != TermColor::Named(NamedColor::Background) {
                 let x = offset_x + MARGIN + col_idx as f64 * cell_w;
                 let bg_color = term_color_to_peniko(cell.bg);
                 let cell_rect = Rect::new(x, y, x + cell_w, y + cell_h);

@@ -3,6 +3,7 @@ use crate::pane::Pane;
 use crate::pane_tree::{PaneId, SplitDirection};
 use crate::terminal::TerminalConfig;
 use xilem::AppState;
+use copypasta::{ClipboardContext, ClipboardProvider};
 
 /// Global application state
 pub struct App {
@@ -34,6 +35,20 @@ pub struct App {
     pub last_key_info: String,
     /// Redraw proxy to wake up the event loop directly
     pub redraw_proxy: Option<xilem::core::MessageProxy<()>>,
+    /// Last layout of panes (cached for mouse hit testing)
+    pub last_pane_layouts: Vec<(PaneId, crate::pane_tree::Rect)>,
+    /// Sidebar visibility
+    pub show_sidebar: bool,
+    /// Right sidebar visibility
+    pub show_right_sidebar: bool,
+    /// Current mouse hover coordinates relative to the terminal view
+    pub hover_pos: Option<(f64, f64)>,
+    /// Monospace font cell width measured during rendering
+    pub cell_w: f64,
+    /// Monospace font cell height measured during rendering
+    pub cell_h: f64,
+    /// System clipboard interface
+    pub clipboard: Option<ClipboardContext>,
 }
 
 impl AppState for App {
@@ -58,18 +73,25 @@ impl App {
             terminal_config: config,
             prefix_mode: false,
             prefix_indicator: String::new(),
-            status_message: "Ready - Ctrl+B for prefix mode".to_string(),
+            status_message: "Ready - Shortcuts active".to_string(),
             running: true,
             redraw_counter: 0,
             pending_resizes: Vec::new(),
             last_key_info: "None".to_string(),
             redraw_proxy: None,
+            last_pane_layouts: Vec::new(),
+            show_sidebar: true,
+            show_right_sidebar: false,
+            hover_pos: None,
+            cell_w: 10.0,
+            cell_h: 20.0,
+            clipboard: ClipboardContext::new().ok(),
         }
     }
 
     /// Register the Xilem message proxy to wake up the event loop when terminal stdout changes
     pub fn register_redraw_proxy(&mut self, proxy: xilem::core::MessageProxy<()>) {
-        println!("DEBUG: Registering redraw_proxy on App!");
+        // println!("DEBUG: Registering redraw_proxy on App!");
         self.redraw_proxy = Some(proxy.clone());
         
         // Propagate to all existing terminals in all groups & tabs
@@ -217,7 +239,7 @@ impl App {
 
     /// Remove a specific tab by index
     pub fn remove_tab_at(&mut self, index: usize) {
-        println!("DEBUG: App::remove_tab_at: index={}, total_tabs={}", index, self.active_group().map_or(0, |g| g.tabs.len()));
+        // println!("DEBUG: App::remove_tab_at: index={}, total_tabs={}", index, self.active_group().map_or(0, |g| g.tabs.len()));
         let mut should_remove_group = false;
         if let Some(group) = self.active_group_mut() {
             if group.tabs.len() > 1 {
@@ -233,10 +255,10 @@ impl App {
         
         if should_remove_group {
             if self.groups.len() <= 1 {
-                println!("DEBUG: Cannot remove last tab/group");
+                // println!("DEBUG: Cannot remove last tab/group");
                 self.status_message = "Cannot remove the last tab of the app".to_string();
             } else {
-                println!("DEBUG: Removing group because last tab closed");
+                // println!("DEBUG: Removing group because last tab closed");
                 self.remove_group();
                 self.status_message = "Closed last tab and group".to_string();
             }
@@ -328,6 +350,10 @@ impl App {
 
     /// Handle key events, including prefix mode
     pub fn handle_key(&mut self, key: &str) {
+        if let Some(pane) = self.active_pane() {
+            pane.terminal.clear_selection();
+            self.redraw_counter += 1;
+        }
         if self.prefix_mode {
             match key {
                 "c" => self.split_pane(SplitDirection::Vertical),
@@ -359,8 +385,12 @@ impl App {
 
     /// Handle a raw keyboard event with modifier information
     pub fn handle_raw_key_event(&mut self, key: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
+        if let Some(pane) = self.active_pane() {
+            pane.terminal.clear_selection();
+            self.redraw_counter += 1;
+        }
         let info = format!("Key: {} (Ctrl: {}, Alt: {}, Shift: {})", key, ctrl, alt, shift);
-        println!("DEBUG: App::handle_raw_key_event: {}", info);
+        // println!("DEBUG: App::handle_raw_key_event: {}", info);
         self.last_key_info = info;
         crate::keyboard::handle_key_input(self, key, ctrl, alt, shift)
     }
@@ -399,6 +429,259 @@ impl App {
                     pane_state.scroll_offset = new_offset.max(0) as usize;
                     // Force a redraw
                     self.redraw_counter += 1;
+                }
+            }
+        }
+    }
+
+    /// Rename the active group (workspace)
+    pub fn rename_active_group(&mut self) {
+        if let Some(group) = self.active_group_mut() {
+            group.name = format!("{} 📝", group.name.trim_end_matches(" 📝"));
+            self.status_message = format!("Renamed workspace to {}", group.name);
+            self.redraw_counter += 1;
+        }
+    }
+
+    /// Edit active group (workspace) description
+    pub fn edit_active_group_description(&mut self) {
+        if let Some(group) = self.active_group_mut() {
+            self.status_message = format!("Workspace {}: A high-performance multiplexer workspace.", group.name);
+            self.redraw_counter += 1;
+        }
+    }
+
+    /// Focus a pane by its unique ID
+    pub fn focus_pane_by_id(&mut self, pane_id: usize) {
+        if let Some(group) = self.groups.get_mut(self.active_group_index) {
+            if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
+                if tab.active_pane_id != pane_id {
+                    // Deactivate old active pane
+                    if let Some((old_pane, _)) = tab.pane_tree.find_mut(tab.active_pane_id) {
+                        old_pane.set_active(false);
+                    }
+                    // Activate clicked pane
+                    if let Some((new_pane, _)) = tab.pane_tree.find_mut(pane_id) {
+                        new_pane.set_active(true);
+                        tab.active_pane_id = pane_id;
+                        self.status_message = format!("Focused pane {}", pane_id);
+                        self.redraw_counter += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Identify which pane contains the given coordinates
+    pub fn find_pane_at(&self, px: f64, py: f64) -> Option<(usize, crate::pane_tree::Rect)> {
+        for (pane_id, rect) in &self.last_pane_layouts {
+            if px >= rect.x && px <= rect.x + rect.width && py >= rect.y && py <= rect.y + rect.height {
+                return Some((*pane_id, *rect));
+            }
+        }
+        None
+    }
+
+    /// Handle mouse button press down at coordinates (px, py)
+    pub fn handle_mouse_down(&mut self, px: f64, py: f64, button: xilem::masonry::core::PointerButton) {
+        // 1. Check if clicked a pane's top-right floating close button (if split panes are present)
+        let mut clicked_close_pane_id = None;
+        if let Some(group) = self.groups.get(self.active_group_index) {
+            if let Some(tab) = group.tabs.get(group.active_tab_index) {
+                if tab.pane_tree.pane_count() > 1 {
+                    for (pane_id, rect) in &self.last_pane_layouts {
+                        let cb_x_min = rect.x + rect.width - 32.0;
+                        let cb_x_max = rect.x + rect.width;
+                        let cb_y_min = rect.y;
+                        let cb_y_max = rect.y + 32.0;
+                        if px >= cb_x_min && px <= cb_x_max && py >= cb_y_min && py <= cb_y_max {
+                            clicked_close_pane_id = Some(*pane_id);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(pane_id) = clicked_close_pane_id {
+            self.focus_pane_by_id(pane_id);
+            self.close_pane();
+            return;
+        }
+
+        // 2. Normal pane focus & selection/paste click
+        let clicked = self.find_pane_at(px, py);
+        if let Some((pane_id, rect)) = clicked {
+            self.focus_pane_by_id(pane_id);
+
+            if let Some(group) = self.groups.get_mut(self.active_group_index) {
+                if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
+                    if let Some((pane, pane_state)) = tab.pane_tree.find_mut(pane_id) {
+                        let cols = pane.terminal.grid_cols();
+                        let rows = pane.terminal.grid_rows();
+                        let display_offset = pane_state.scroll_offset;
+
+                        let col = (((px - rect.x - 12.0) / self.cell_w).floor().max(0.0) as usize)
+                            .min(cols.saturating_sub(1));
+                        let row = (((py - rect.y - 12.0) / self.cell_h).floor().max(0.0) as i32)
+                            .min((rows as i32).saturating_sub(1));
+                        let line_num = row - display_offset as i32;
+
+                        if button == xilem::masonry::core::PointerButton::Primary {
+                            pane.terminal.start_selection(line_num, col);
+                            self.redraw_counter += 1;
+                        } else if button == xilem::masonry::core::PointerButton::Secondary {
+                            // Right click -> Paste clipboard content
+                            if let Some(ref mut clip) = self.clipboard {
+                                if let Ok(text) = clip.get_contents() {
+                                    let _ = pane.terminal.write_input(text.as_bytes());
+                                }
+                            }
+                            pane.terminal.clear_selection();
+                            self.redraw_counter += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle mouse move/dragging at coordinates (px, py)
+    pub fn handle_mouse_move(&mut self, px: f64, py: f64, is_dragging: bool) {
+        self.hover_pos = Some((px, py));
+        self.redraw_counter += 1;
+
+        if is_dragging {
+            let active_id = if let Some(pane) = self.active_pane() {
+                pane.id
+            } else {
+                return;
+            };
+
+            let active_rect = if let Some((_, r)) = self.last_pane_layouts.iter().find(|(id, _)| *id == active_id) {
+                *r
+            } else {
+                return;
+            };
+
+            if let Some(group) = self.groups.get_mut(self.active_group_index) {
+                if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
+                    if let Some((pane, pane_state)) = tab.pane_tree.find_mut(active_id) {
+                        let cols = pane.terminal.grid_cols();
+                        let rows = pane.terminal.grid_rows();
+                        let display_offset = pane_state.scroll_offset;
+
+                        let col = (((px - active_rect.x - 12.0) / self.cell_w).floor().max(0.0) as usize)
+                            .min(cols.saturating_sub(1));
+                        let row = (((py - active_rect.y - 12.0) / self.cell_h).floor().max(0.0) as i32)
+                            .min((rows as i32).saturating_sub(1));
+                        let line_num = row - display_offset as i32;
+
+                        pane.terminal.update_selection(line_num, col);
+                        self.redraw_counter += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle mouse button release up at coordinates (px, py)
+    pub fn handle_mouse_up(&mut self, _px: f64, _py: f64, button: xilem::masonry::core::PointerButton) {
+        if button == xilem::masonry::core::PointerButton::Primary {
+            let active_id = if let Some(pane) = self.active_pane() {
+                pane.id
+            } else {
+                return;
+            };
+
+            if let Some(group) = self.groups.get_mut(self.active_group_index) {
+                if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
+                    if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
+                        if let Some(selected_text) = pane.terminal.selection_to_string() {
+                            if !selected_text.is_empty() {
+                                if let Some(ref mut clip) = self.clipboard {
+                                    let _ = clip.set_contents(selected_text);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Focus pane directionally (left, right, up, down)
+    pub fn focus_pane_directionally(&mut self, direction: &str) {
+        // println!("DEBUG: focus_pane_directionally: {}", direction);
+        let active_id = if let Some(pane) = self.active_pane() {
+            pane.id
+        } else {
+            return;
+        };
+
+        // Find active pane's rect
+        let active_rect = if let Some((_, r)) = self.last_pane_layouts.iter().find(|(id, _)| *id == active_id) {
+            *r
+        } else {
+            return;
+        };
+
+        let cx_a = active_rect.x + active_rect.width / 2.0;
+        let cy_a = active_rect.y + active_rect.height / 2.0;
+
+        let mut best_pane_id = None;
+        let mut best_score = f64::MAX;
+
+        for (pane_id, rect) in &self.last_pane_layouts {
+            if *pane_id == active_id {
+                continue;
+            }
+            let cx_p = rect.x + rect.width / 2.0;
+            let cy_p = rect.y + rect.height / 2.0;
+
+            let dx = cx_p - cx_a;
+            let dy = cy_p - cy_a;
+
+            let matches = match direction {
+                "left" => dx < -1.0,
+                "right" => dx > 1.0,
+                "up" => dy < -1.0,
+                "down" => dy > 1.0,
+                _ => false,
+            };
+
+            if matches {
+                let score = match direction {
+                    "left" => -dx + 2.0 * dy.abs(),
+                    "right" => dx + 2.0 * dy.abs(),
+                    "up" => -dy + 2.0 * dx.abs(),
+                    "down" => dy + 2.0 * dx.abs(),
+                    _ => f64::MAX,
+                };
+                if score < best_score {
+                    best_score = score;
+                    best_pane_id = Some(*pane_id);
+                }
+            }
+        }
+
+        if let Some(pane_id) = best_pane_id {
+            // Activate the new pane
+            if let Some(group) = self.groups.get_mut(self.active_group_index) {
+                if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
+                    if tab.active_pane_id != pane_id {
+                        // Deactivate old active pane
+                        if let Some((old_pane, _)) = tab.pane_tree.find_mut(tab.active_pane_id) {
+                            old_pane.set_active(false);
+                        }
+                        // Activate clicked pane
+                        if let Some((new_pane, _)) = tab.pane_tree.find_mut(pane_id) {
+                            new_pane.set_active(true);
+                            tab.active_pane_id = pane_id;
+                            self.status_message = format!("Focused pane {}", pane_id);
+                            self.redraw_counter += 1;
+                        }
+                    }
                 }
             }
         }

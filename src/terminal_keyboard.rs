@@ -6,10 +6,11 @@
 /// 3. Routes prefix commands (Ctrl+B followed by c/d/n/p/x)
 /// 4. Forwards other input to the active terminal's PTY using alacritty-style handling
 
+use std::sync::Mutex;
 use xilem::masonry::core::{
     Widget, EventCtx, PropertiesMut, PropertiesRef, TextEvent, PointerEvent,
     RegisterCtx, LayoutCtx, MeasureCtx, PaintCtx, AccessCtx, ChildrenIds,
-    WidgetPod, NewWidget, WidgetMut, AccessEvent, PointerScrollEvent,
+    WidgetPod, NewWidget, WidgetMut, AccessEvent, PointerScrollEvent, WidgetId,
 };
 use xilem::masonry::kurbo::{Size, Axis};
 use xilem::masonry::imaging::Painter;
@@ -18,6 +19,8 @@ use xilem::masonry::layout::LenReq;
 
 use crate::app::App;
 use xilem::core::ViewPathTracker;
+
+static TERMINAL_WIDGET_ID: Mutex<Option<WidgetId>> = Mutex::new(None);
 
 
 #[derive(Debug, Clone)]
@@ -32,13 +35,20 @@ pub struct KeyAction {
 pub enum TerminalAction {
     Key(KeyAction),
     Scroll { delta_lines: i32 },
+    MouseDown { x: f64, y: f64, button: xilem::masonry::core::PointerButton },
+    MouseMove { x: f64, y: f64, is_dragging: bool },
+    MouseUp { x: f64, y: f64, button: xilem::masonry::core::PointerButton },
 }
 
-pub struct TerminalKeyboardWidget;
+pub struct TerminalKeyboardWidget {
+    is_left_down: bool,
+}
 
 impl TerminalKeyboardWidget {
     pub fn new() -> Self {
-        Self
+        Self {
+            is_left_down: false,
+        }
     }
 }
 
@@ -63,21 +73,51 @@ impl Widget for TerminalKeyboardWidget {
         event: &PointerEvent,
     ) {
         match event {
-            PointerEvent::Down(..) => {
-                println!("DEBUG: TerminalKeyboardWidget clicked, requesting focus");
+            PointerEvent::Down(pointer_event) => {
                 ctx.request_focus();
+                let x = pointer_event.state.position.x;
+                let y = pointer_event.state.position.y;
+                let button = pointer_event.button;
+                if button == Some(xilem::masonry::core::PointerButton::Primary) {
+                    self.is_left_down = true;
+                }
+                if let Some(btn) = button {
+                    ctx.submit_action::<TerminalAction>(TerminalAction::MouseDown { x, y, button: btn });
+                }
+            }
+            PointerEvent::Up(pointer_event) => {
+                let x = pointer_event.state.position.x;
+                let y = pointer_event.state.position.y;
+                let button = pointer_event.button;
+                if button == Some(xilem::masonry::core::PointerButton::Primary) {
+                    self.is_left_down = false;
+                }
+                if let Some(btn) = button {
+                    ctx.submit_action::<TerminalAction>(TerminalAction::MouseUp { x, y, button: btn });
+                }
+            }
+            PointerEvent::Move(pointer_event) => {
+                ctx.request_focus();
+                let x = pointer_event.current.position.x;
+                let y = pointer_event.current.position.y;
+                ctx.submit_action::<TerminalAction>(TerminalAction::MouseMove {
+                    x,
+                    y,
+                    is_dragging: self.is_left_down,
+                });
             }
             PointerEvent::Scroll(PointerScrollEvent { delta, .. }) => {
+                ctx.request_focus();
                 use xilem::masonry::core::ScrollDelta;
                 let lines = match delta {
-                    ScrollDelta::LineDelta(_x, y) => -*y as i32,
+                    ScrollDelta::LineDelta(_x, y) => *y as i32,
                     ScrollDelta::PixelDelta(pos) => {
                         // Approximate: 40px per line
-                        -(pos.y / 40.0) as i32
+                        (pos.y / 40.0) as i32
                     }
                     ScrollDelta::PageDelta(_x, y) => {
                         // Page scroll: treat as ~20 lines per page
-                        -(*y as i32) * 20
+                        (*y as i32) * 20
                     }
                 };
                 if lines != 0 {
@@ -85,10 +125,7 @@ impl Widget for TerminalKeyboardWidget {
                     ctx.set_handled();
                 }
             }
-            _ => {
-                // Request focus on pointer move, hover, or enter to guarantee automatic, click-free focus
-                ctx.request_focus();
-            }
+            _ => {}
         }
     }
 
@@ -102,7 +139,7 @@ impl Widget for TerminalKeyboardWidget {
         use xilem::masonry::core::keyboard::NamedKey as MasonryNamedKey;
         use xilem::masonry::core::keyboard::KeyState;
 
-        println!("DEBUG: TerminalKeyboardWidget received text event: {:?}", event);
+        // println!("DEBUG: TerminalKeyboardWidget received text event: {:?}", event);
         match event {
             TextEvent::Keyboard(key_event) => {
                 // Request focus again to be safe
@@ -183,7 +220,7 @@ impl Widget for TerminalKeyboardWidget {
                         alt: mods_dbg.contains("ALT"),
                         shift: mods_dbg.contains("SHIFT"),
                     };
-                    println!("DEBUG: TerminalKeyboardWidget captured: {:?}", action);
+                    // println!("DEBUG: TerminalKeyboardWidget captured: {:?}", action);
                     ctx.submit_action::<TerminalAction>(TerminalAction::Key(action));
                 }
             }
@@ -268,6 +305,9 @@ where
         let pod = ctx.with_action_widget(|ctx| {
             ctx.create_pod(widget)
         });
+        if let Ok(mut lock) = TERMINAL_WIDGET_ID.lock() {
+            *lock = Some(pod.new_widget.id());
+        }
         (pod, ())
     }
 
@@ -373,6 +413,11 @@ impl Widget for FocuslessButtonWidget {
                     ctx.submit_action::<Self::Action>(FocuslessButtonPress {
                         button: pointer_event.button,
                     });
+                    if let Ok(lock) = TERMINAL_WIDGET_ID.lock() {
+                        if let Some(terminal_id) = *lock {
+                            ctx.set_focus(terminal_id);
+                        }
+                    }
                 }
                 ctx.request_paint_only();
             }
@@ -396,6 +441,11 @@ impl Widget for FocuslessButtonWidget {
         match event.action {
             accesskit::Action::Click => {
                 ctx.submit_action::<Self::Action>(FocuslessButtonPress { button: None });
+                if let Ok(lock) = TERMINAL_WIDGET_ID.lock() {
+                    if let Some(terminal_id) = *lock {
+                        ctx.set_focus(terminal_id);
+                    }
+                }
             }
             _ => {}
         }
@@ -575,4 +625,126 @@ where
             _ => xilem::core::MessageResult::Stale,
         }
     }
+}
+
+// ─── DragArea Widget & View ───
+
+pub struct DragAreaWidget;
+
+impl Widget for DragAreaWidget {
+    type Action = ();
+
+    fn accepts_focus(&self) -> bool {
+        false
+    }
+
+    fn accepts_text_input(&self) -> bool {
+        false
+    }
+
+    fn on_pointer_event(
+        &mut self,
+        _ctx: &mut EventCtx<'_>,
+        _props: &mut PropertiesMut<'_>,
+        event: &PointerEvent,
+    ) {
+        if let PointerEvent::Down(..) = event {
+            // println!("DEBUG: DragAreaWidget clicked, dragging window");
+            crate::win_util::drag_active_window();
+        }
+    }
+
+    fn on_text_event(
+        &mut self,
+        _ctx: &mut EventCtx<'_>,
+        _props: &mut PropertiesMut<'_>,
+        _event: &TextEvent,
+    ) {}
+
+    fn register_children(&mut self, _ctx: &mut RegisterCtx<'_>) {}
+
+    fn measure(
+        &mut self,
+        _ctx: &mut MeasureCtx<'_>,
+        _props: &PropertiesRef<'_>,
+        _axis: Axis,
+        len_req: LenReq,
+        _cross_length: Option<f64>,
+    ) -> f64 {
+        match len_req {
+            LenReq::MinContent | LenReq::MaxContent => 0.0,
+            LenReq::FitContent(space) => space,
+        }
+    }
+
+    fn layout(&mut self, _ctx: &mut LayoutCtx<'_>, _props: &PropertiesRef<'_>, _size: Size) {}
+
+    fn paint(
+        &mut self,
+        _ctx: &mut PaintCtx<'_>,
+        _props: &PropertiesRef<'_>,
+        _painter: &mut Painter<'_>,
+    ) {}
+
+    fn accessibility_role(&self) -> Role {
+        Role::Unknown
+    }
+
+    fn accessibility(
+        &mut self,
+        _ctx: &mut AccessCtx<'_>,
+        _props: &PropertiesRef<'_>,
+        _node: &mut Node,
+    ) {}
+
+    fn children_ids(&self) -> ChildrenIds {
+        ChildrenIds::new()
+    }
+}
+
+pub struct DragArea;
+
+impl xilem::core::ViewMarker for DragArea {}
+
+impl<State: 'static, Action> xilem::core::View<State, Action, xilem::ViewCtx> for DragArea {
+    type Element = xilem::Pod<DragAreaWidget>;
+    type ViewState = ();
+
+    fn build(&self, ctx: &mut xilem::ViewCtx, _state: &mut State) -> (Self::Element, Self::ViewState) {
+        let widget = DragAreaWidget;
+        let pod = ctx.create_pod(widget);
+        (pod, ())
+    }
+
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        _view_state: &mut Self::ViewState,
+        _ctx: &mut xilem::ViewCtx,
+        _element: xilem::core::Mut<'_, Self::Element>,
+        _app_state: &mut State,
+    ) {}
+
+    fn teardown(
+        &self,
+        _view_state: &mut Self::ViewState,
+        _ctx: &mut xilem::ViewCtx,
+        _element: xilem::core::Mut<'_, Self::Element>,
+    ) {
+        // No teardown needed
+    }
+
+    fn message(
+        &self,
+        _view_state: &mut Self::ViewState,
+        _message: &mut xilem::core::MessageCtx,
+        _element: xilem::core::Mut<'_, Self::Element>,
+        _app_state: &mut State,
+    ) -> xilem::core::MessageResult<Action> {
+        xilem::core::MessageResult::Nop
+    }
+}
+
+pub fn drag_area() -> DragArea {
+    DragArea
 }

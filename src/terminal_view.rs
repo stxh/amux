@@ -44,12 +44,17 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
             mb.push_default(StyleProperty::FontSize(18.0));
             let mut ml = mb.build(probe);
             ml.break_all_lines(None);
-            (ml.width() as f64 / 10.0, ml.height() as f64)
+            let w = ml.width() as f64 / 10.0;
+            let h = ml.height() as f64;
+            (w, h)
         };
+        state.cell_w = cell_w;
+        state.cell_h = cell_h;
 
         // 对 pane tree 中的所有 pane 计算布局
         let area = Rect::new(0.0, 0.0, available_size.width, available_size.height);
         let layouts = tab.pane_tree.layout(area);
+        state.last_pane_layouts = layouts.clone();
         let active_pane_id = tab.active_pane_id;
 
         // 收集需要 resize 的 pane（先收集，避免借用冲突）
@@ -88,6 +93,41 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
                     fcx,
                     lcx,
                 );
+
+                // Draw floating close button overlay on hover (only if split pane count > 1)
+                let pane_count = layouts.len();
+                if pane_count > 1 {
+                    let cb_x_min = rect.x + rect.width - 32.0;
+                    let cb_x_max = rect.x + rect.width;
+                    let cb_y_min = rect.y;
+                    let cb_y_max = rect.y + 32.0;
+
+                    let is_hovering_close = if let Some((hx, hy)) = state.hover_pos {
+                        hx >= cb_x_min && hx <= cb_x_max && hy >= cb_y_min && hy <= cb_y_max
+                    } else {
+                        false
+                    };
+
+                    if is_hovering_close {
+                        // Draw close button circle
+                        let circle_center = xilem::masonry::kurbo::Point::new(rect.x + rect.width - 16.0, rect.y + 16.0);
+                        let circle = xilem::masonry::kurbo::Circle::new(circle_center, 12.0);
+                        painter.fill(&circle, Color::from_rgba8(235, 78, 78, 255)).draw(); // vibrant red
+
+                        // Draw '✕' lines
+                        let stroke = xilem::masonry::kurbo::Stroke::new(2.0);
+                        let line1 = xilem::masonry::kurbo::Line::new(
+                            xilem::masonry::kurbo::Point::new(rect.x + rect.width - 21.0, rect.y + 11.0),
+                            xilem::masonry::kurbo::Point::new(rect.x + rect.width - 11.0, rect.y + 21.0),
+                        );
+                        let line2 = xilem::masonry::kurbo::Line::new(
+                            xilem::masonry::kurbo::Point::new(rect.x + rect.width - 11.0, rect.y + 11.0),
+                            xilem::masonry::kurbo::Point::new(rect.x + rect.width - 21.0, rect.y + 21.0),
+                        );
+                        painter.stroke(&line1, &stroke, Color::WHITE).draw();
+                        painter.stroke(&line2, &stroke, Color::WHITE).draw();
+                    }
+                }
             }
         }
 
