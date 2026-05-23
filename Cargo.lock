@@ -183,6 +183,7 @@ dependencies = [
  "portable-pty",
  "skrifa",
  "tokio",
+ "tracing-subscriber",
  "winit",
  "xilem",
 ]

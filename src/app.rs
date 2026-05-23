@@ -49,6 +49,12 @@ pub struct App {
     pub cell_h: f64,
     /// System clipboard interface
     pub clipboard: Option<ClipboardContext>,
+    /// Timestamp of last mouse click (for multi-click detection)
+    last_click_time: std::time::Instant,
+    /// Pane ID of last click (resets click count on different pane)
+    last_click_pane_id: usize,
+    /// Current click count (1=click, 2=double-click, 3=triple-click)
+    click_count: usize,
 }
 
 impl AppState for App {
@@ -86,6 +92,9 @@ impl App {
             cell_w: 10.0,
             cell_h: 20.0,
             clipboard: ClipboardContext::new().ok(),
+            last_click_time: std::time::Instant::now(),
+            last_click_pane_id: 0,
+            click_count: 0,
         }
     }
 
@@ -482,6 +491,21 @@ impl App {
         None
     }
 
+    /// Detect multi-click based on timing and pane
+    fn update_click_state(&mut self, pane_id: usize) -> usize {
+        const DOUBLE_CLICK_THRESHOLD_MS: u128 = 500;
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_click_time).as_millis();
+        if elapsed < DOUBLE_CLICK_THRESHOLD_MS && pane_id == self.last_click_pane_id {
+            self.click_count = self.click_count.saturating_add(1).min(3);
+        } else {
+            self.click_count = 1;
+        }
+        self.last_click_time = now;
+        self.last_click_pane_id = pane_id;
+        self.click_count
+    }
+
     /// Handle mouse button press down at coordinates (px, py)
     pub fn handle_mouse_down(&mut self, px: f64, py: f64, button: xilem::masonry::core::PointerButton) {
         // 1. Check if clicked a pane's top-right floating close button (if split panes are present)
@@ -514,12 +538,25 @@ impl App {
         if let Some((pane_id, rect)) = clicked {
             self.focus_pane_by_id(pane_id);
 
+            // Determine selection type from click count (do this before mutable group borrow)
+            use alacritty_terminal::selection::SelectionType;
+            let sel_type = if button == xilem::masonry::core::PointerButton::Primary {
+                let click_count = self.update_click_state(pane_id);
+                match click_count {
+                    2 => SelectionType::Semantic,
+                    3 => SelectionType::Lines,
+                    _ => SelectionType::Simple,
+                }
+            } else {
+                SelectionType::Simple
+            };
+
             if let Some(group) = self.groups.get_mut(self.active_group_index) {
                 if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
                     if let Some((pane, pane_state)) = tab.pane_tree.find_mut(pane_id) {
                         let cols = pane.terminal.grid_cols();
                         let rows = pane.terminal.grid_rows();
-                        let display_offset = pane_state.scroll_offset;
+                        let display_offset = pane_state.scroll_offset + pane.terminal.display_offset();
 
                         let col = (((px - rect.x - 12.0) / self.cell_w).floor().max(0.0) as usize)
                             .min(cols.saturating_sub(1));
@@ -528,7 +565,7 @@ impl App {
                         let line_num = row - display_offset as i32;
 
                         if button == xilem::masonry::core::PointerButton::Primary {
-                            pane.terminal.start_selection(line_num, col);
+                            pane.terminal.start_selection_with_type(line_num, col, sel_type);
                             self.redraw_counter += 1;
                         } else if button == xilem::masonry::core::PointerButton::Secondary {
                             // Right click -> Paste clipboard content
@@ -569,7 +606,7 @@ impl App {
                     if let Some((pane, pane_state)) = tab.pane_tree.find_mut(active_id) {
                         let cols = pane.terminal.grid_cols();
                         let rows = pane.terminal.grid_rows();
-                        let display_offset = pane_state.scroll_offset;
+                        let display_offset = pane_state.scroll_offset + pane.terminal.display_offset();
 
                         let col = (((px - active_rect.x - 12.0) / self.cell_w).floor().max(0.0) as usize)
                             .min(cols.saturating_sub(1));
@@ -687,3 +724,4 @@ impl App {
         }
     }
 }
+

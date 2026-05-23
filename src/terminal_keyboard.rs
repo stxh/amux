@@ -75,8 +75,10 @@ impl Widget for TerminalKeyboardWidget {
         match event {
             PointerEvent::Down(pointer_event) => {
                 ctx.request_focus();
-                let x = pointer_event.state.position.x;
-                let y = pointer_event.state.position.y;
+                let physical = pointer_event.state.position;
+                let pos = ctx.local_position(physical);
+                let x = pos.x;
+                let y = pos.y;
                 let button = pointer_event.button;
                 if button == Some(xilem::masonry::core::PointerButton::Primary) {
                     self.is_left_down = true;
@@ -86,8 +88,10 @@ impl Widget for TerminalKeyboardWidget {
                 }
             }
             PointerEvent::Up(pointer_event) => {
-                let x = pointer_event.state.position.x;
-                let y = pointer_event.state.position.y;
+                let physical = pointer_event.state.position;
+                let pos = ctx.local_position(physical);
+                let x = pos.x;
+                let y = pos.y;
                 let button = pointer_event.button;
                 if button == Some(xilem::masonry::core::PointerButton::Primary) {
                     self.is_left_down = false;
@@ -98,8 +102,10 @@ impl Widget for TerminalKeyboardWidget {
             }
             PointerEvent::Move(pointer_event) => {
                 ctx.request_focus();
-                let x = pointer_event.current.position.x;
-                let y = pointer_event.current.position.y;
+                let physical = pointer_event.current.position;
+                let pos = ctx.local_position(physical);
+                let x = pos.x;
+                let y = pos.y;
                 ctx.submit_action::<TerminalAction>(TerminalAction::MouseMove {
                     x,
                     y,

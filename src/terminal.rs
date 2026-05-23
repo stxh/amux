@@ -323,13 +323,19 @@ impl Terminal {
         term.selection = None;
     }
 
-    /// Start a new selection
-    pub fn start_selection(&self, line: i32, col: usize) {
+    /// Start a new selection with the given type
+    pub fn start_selection_with_type(&self, line: i32, col: usize, ty: alacritty_terminal::selection::SelectionType) {
         use alacritty_terminal::index::{Point, Column, Line, Side};
-        use alacritty_terminal::selection::{Selection, SelectionType};
+        use alacritty_terminal::selection::Selection;
         let mut term = self.term.lock().unwrap();
         let point = Point::new(Line(line), Column(col));
-        term.selection = Some(Selection::new(SelectionType::Simple, point, Side::Left));
+        term.selection = Some(Selection::new(ty, point, Side::Left));
+    }
+
+    /// Start a new simple (character-based) selection
+    pub fn start_selection(&self, line: i32, col: usize) {
+        use alacritty_terminal::selection::SelectionType;
+        self.start_selection_with_type(line, col, SelectionType::Simple);
     }
 
     /// Update selection end point

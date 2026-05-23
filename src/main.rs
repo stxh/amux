@@ -335,6 +335,14 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
 }
 
 fn main() {
+    // Silence verbose framework debug logs by defaulting to "info" level
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
+
     let app_state = App::new();
 
     let app = Xilem::new_simple(

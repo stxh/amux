@@ -26,6 +26,10 @@ mod colors {
     pub const TEXT:      Color = Color::from_rgba8(0xc6, 0xd0, 0xf5, 0xff);
     pub const BLUE:      Color = Color::from_rgba8(0x89, 0xb4, 0xfa, 0xff);
     pub const ROSEWATER: Color = Color::from_rgba8(0xf5, 0xe0, 0xdc, 0xff);
+
+    // Sleek dimmed border colors
+    pub const ACTIVE_BORDER:   Color = Color::from_rgba8(0x3b, 0x59, 0x7f, 0xff); // Classy muted steel blue
+    pub const INACTIVE_BORDER: Color = Color::from_rgba8(0x22, 0x22, 0x30, 0xff); // Elegant subtle dark grey
 }
 
 /// Convert alacritty TermColor to peniko Color
@@ -217,6 +221,8 @@ pub fn render_terminal_with_offset(
             // If this is the cursor cell, invert colors (cursor bg is TEXT, text fg is CRUST)
             if is_active && is_cursor_row && col_idx == cursor_col {
                 fg_color = colors::CRUST;
+            } else if terminal.is_cell_selected(line_num, col_idx) {
+                fg_color = colors::CRUST;
             }
 
             char_colors.push(fg_color);
@@ -236,7 +242,7 @@ pub fn render_terminal_with_offset(
             let is_selected = terminal.is_cell_selected(line_num, col_idx);
             if is_selected {
                 let x = offset_x + MARGIN + col_idx as f64 * cell_w;
-                let bg_color = colors::SURFACE1;
+                let bg_color = colors::BLUE;
                 let cell_rect = Rect::new(x, y, x + cell_w, y + cell_h);
                 painter.fill(&cell_rect, bg_color).draw();
             } else if cell.bg != TermColor::Named(NamedColor::Background) {
@@ -266,7 +272,7 @@ pub fn render_terminal_with_offset(
         // Draw cursor block for this row before text (use row y for consistent positioning)
         if is_active && is_cursor_row && cursor_col < cols as usize {
             let cursor_x = offset_x + MARGIN + cursor_col as f64 * cell_w;
-            let cursor_rect = Rect::new(cursor_x, y + 14.0, cursor_x + cell_w, y + 14.0 + cell_h);
+            let cursor_rect = Rect::new(cursor_x, y, cursor_x + cell_w, y + cell_h);
             painter.fill(&cursor_rect, colors::TEXT).draw();
         }
 
@@ -304,15 +310,14 @@ pub fn render_terminal_with_offset(
             layout.break_all_lines(None);
             layout.align(None, Alignment::Start, AlignmentOptions::default());
 
-            // Position baseline
-            let text_y_base = y + cell_h * 0.78;
-            let transform = Affine::translate((offset_x + MARGIN, text_y_base));
+            // Position layout at top-left y (aligns text perfectly with background cells, cursor, and mouse clicks)
+            let transform = Affine::translate((offset_x + MARGIN, y));
 
             render_text(painter, transform, &layout, &brushes, true);
         }
     }
     // Border
-    let border_color = if is_active { colors::BLUE } else { colors::SURFACE0 };
+    let border_color = if is_active { colors::ACTIVE_BORDER } else { colors::INACTIVE_BORDER };
     let border = Stroke::new(2.0);
     painter.stroke(&rect, &border, border_color).draw();
 
