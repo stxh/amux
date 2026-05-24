@@ -12,7 +12,7 @@ use xilem::masonry::core::render_text;
 use xilem::masonry::imaging::{Painter, record::Scene};
 use xilem::masonry::kurbo::{Affine, Rect, Size, Stroke};
 use xilem::masonry::parley::style::{FontFamily, FontFamilyName, GenericFamily, StyleProperty};
-use xilem::masonry::parley::{Alignment, AlignmentOptions};
+
 use xilem::masonry::peniko::{Brush, Color};
 
 use crate::terminal::Terminal;
@@ -245,11 +245,22 @@ pub fn render_terminal_with_offset(
                 let bg_color = colors::BLUE;
                 let cell_rect = Rect::new(x, y, x + cell_w, y + cell_h);
                 painter.fill(&cell_rect, bg_color).draw();
+                // For wide characters, also highlight the spacer cell
+                if cell.flags.contains(Flags::WIDE_CHAR) && col_idx + 1 < cols {
+                    let sx = offset_x + MARGIN + (col_idx + 1) as f64 * cell_w;
+                    let spacer_rect = Rect::new(sx, y, sx + cell_w, y + cell_h);
+                    painter.fill(&spacer_rect, bg_color).draw();
+                }
             } else if cell.bg != TermColor::Named(NamedColor::Background) {
                 let x = offset_x + MARGIN + col_idx as f64 * cell_w;
                 let bg_color = term_color_to_peniko(cell.bg);
                 let cell_rect = Rect::new(x, y, x + cell_w, y + cell_h);
                 painter.fill(&cell_rect, bg_color).draw();
+                if cell.flags.contains(Flags::WIDE_CHAR) && col_idx + 1 < cols {
+                    let sx = offset_x + MARGIN + (col_idx + 1) as f64 * cell_w;
+                    let spacer_rect = Rect::new(sx, y, sx + cell_w, y + cell_h);
+                    painter.fill(&spacer_rect, bg_color).draw();
+                }
             }
 
             // Underline
@@ -276,44 +287,54 @@ pub fn render_terminal_with_offset(
             painter.fill(&cursor_rect, colors::TEXT).draw();
         }
 
-        // Render text with per-character coloring using ranged_builder
-        if !row_text.is_empty() {
-            let mut builder = lcx.ranged_builder(fcx, &row_text, 1.0, true);
+        // Render each non-spacer character at its fixed cell position
+        // This ensures CJK wide chars render at correct width without extra gaps
+        for col_idx in 0..cols {
+            let col = Column(col_idx);
+            let cell = &row[col];
+
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+
+            let ch = match cell.c {
+                '\0' => ' ',
+                c if c.is_control() && c != '\t' => ' ',
+                c => c,
+            };
+
+            if ch == ' ' {
+                continue;
+            }
+
+            let fg_color = char_colors[col_idx];
+            let x = offset_x + MARGIN + col_idx as f64 * cell_w;
+
+            let s = ch.to_string();
+            let mut builder = lcx.ranged_builder(fcx, &s, 1.0, true);
             builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
                 FontFamilyName::Generic(GenericFamily::Monospace),
             )));
             builder.push_default(StyleProperty::FontSize(FONT_SIZE));
 
-            // Build color segments: merge consecutive chars with same color
-            let segments = build_color_segments(&row_text, &char_colors);
-
-            // Collect brushes and push ranges
-            let mut brushes: Vec<Brush> = Vec::new();
-            // BrushIndex 0 = default text color
-            brushes.push(Brush::Solid(colors::TEXT));
-
-            for seg in &segments {
-                if seg.color == colors::TEXT {
-                    // Use default brush (index 0)
-                    continue;
-                }
-                // Add this brush and push a range for it
-                let brush_idx = brushes.len();
-                brushes.push(Brush::Solid(seg.color));
+            if fg_color != colors::TEXT {
+                let brush = Brush::Solid(fg_color);
                 builder.push(
-                    StyleProperty::Brush(xilem::masonry::core::BrushIndex(brush_idx)),
-                    seg.start_byte..seg.end_byte,
+                    StyleProperty::Brush(xilem::masonry::core::BrushIndex(1)),
+                    0..s.len(),
                 );
+                let mut layout = builder.build(&s);
+                layout.break_all_lines(None);
+                let transform = Affine::translate((x, y));
+                render_text(painter, transform, &layout, &[Brush::Solid(colors::TEXT), brush], true);
+            } else {
+                let mut layout = builder.build(&s);
+                layout.break_all_lines(None);
+                let transform = Affine::translate((x, y));
+                render_text(painter, transform, &layout, &[Brush::Solid(colors::TEXT)], true);
             }
-
-            let mut layout = builder.build(&row_text);
-            layout.break_all_lines(None);
-            layout.align(None, Alignment::Start, AlignmentOptions::default());
-
-            // Position layout at top-left y (aligns text perfectly with background cells, cursor, and mouse clicks)
-            let transform = Affine::translate((offset_x + MARGIN, y));
-
-            render_text(painter, transform, &layout, &brushes, true);
         }
     }
     // Border

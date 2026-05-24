@@ -312,6 +312,12 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
                 state.handle_mouse_up(x, y, button);
                 true
             }
+            crate::terminal_keyboard::TerminalAction::TextCommit(text) => {
+                if let Some(pane) = state.active_pane_mut() {
+                    let _ = pane.terminal.write_input(text.as_bytes());
+                }
+                true
+            }
         }
     });
 

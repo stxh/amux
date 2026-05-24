@@ -38,6 +38,8 @@ pub enum TerminalAction {
     MouseDown { x: f64, y: f64, button: xilem::masonry::core::PointerButton },
     MouseMove { x: f64, y: f64, is_dragging: bool },
     MouseUp { x: f64, y: f64, button: xilem::masonry::core::PointerButton },
+    /// IME committed text (e.g., from CJK input method)
+    TextCommit(String),
 }
 
 pub struct TerminalKeyboardWidget {
@@ -229,6 +231,15 @@ impl Widget for TerminalKeyboardWidget {
                     // println!("DEBUG: TerminalKeyboardWidget captured: {:?}", action);
                     ctx.submit_action::<TerminalAction>(TerminalAction::Key(action));
                 }
+            }
+            TextEvent::Ime(xilem::masonry::core::Ime::Commit(text)) => {
+                if !text.is_empty() {
+                    ctx.submit_action::<TerminalAction>(TerminalAction::TextCommit(text.clone()));
+                }
+            }
+            TextEvent::Ime(xilem::masonry::core::Ime::Preedit(_, _)) => {
+                // IME composition in progress - ignore preedit rendering for now
+                // The OS handles the composition window
             }
             _ => {}
         }
