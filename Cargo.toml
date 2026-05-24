@@ -30,4 +30,8 @@ winit = "0.30"
 notify-rust = "4"
 copypasta = "0.10.2"
 
+# Force std feature for rustix 0.38 which rustix-openpty disables, causing
+# type mismatch between rustix::fd::OwnedFd and std::os::fd::OwnedFd.
+rustix = "0.38"
+
 

@@ -181,6 +181,7 @@ dependencies = [
  "parley",
  "peniko",
  "portable-pty",
+ "rustix 0.38.44",
  "skrifa",
  "tokio",
  "tracing-subscriber",
