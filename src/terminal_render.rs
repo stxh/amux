@@ -152,9 +152,13 @@ pub fn render_terminal_with_offset(
     // Measure actual monospace character width from font metrics
     const FONT_SIZE: f32 = 18.0;
 
-    // Build a probe layout with a known string to measure character advance width
-    let (cell_w, cell_h) = {
-        let probe = "MMMMMMMMMM"; // 10 chars
+    // Build probe layouts to measure character advance dimensions.
+    // Use a Latin-only probe for cell_w and a mixed Latin+CJK probe for
+    // cell_h, because CJK fallback fonts (e.g. PingFang on macOS) often have
+    // taller metrics than the primary monospace font, causing Chinese glyphs
+    // to overflow the selection-highlight rect.
+    let cell_w = {
+        let probe = "MMMMMMMMMM";
         let mut mb = lcx.ranged_builder(fcx, probe, 1.0, true);
         mb.push_default(StyleProperty::FontFamily(FontFamily::Single(
             FontFamilyName::Generic(GenericFamily::Monospace),
@@ -162,9 +166,22 @@ pub fn render_terminal_with_offset(
         mb.push_default(StyleProperty::FontSize(FONT_SIZE));
         let mut ml = mb.build(probe);
         ml.break_all_lines(None);
-        let w = ml.width() as f64 / 10.0;
+        ml.width() as f64 / 10.0
+    };
+    let (cell_h, baseline_ascent) = {
+        let probe = "MMMMMMMMMM你好"; // Mixed to get the taller metrics
+        let mut mb = lcx.ranged_builder(fcx, probe, 1.0, true);
+        mb.push_default(StyleProperty::FontFamily(FontFamily::Single(
+            FontFamilyName::Generic(GenericFamily::Monospace),
+        )));
+        mb.push_default(StyleProperty::FontSize(FONT_SIZE));
+        let mut ml = mb.build(probe);
+        ml.break_all_lines(None);
         let h = ml.height() as f64;
-        (w, h)
+        // Measure the ascent (distance from line top to baseline) from the
+        // mixed-script probe, which reflects the taller CJK metrics.
+        let ascent = ml.lines().next().map_or(h * 0.8, |l| l.metrics().baseline as f64);
+        (h, ascent)
     };
 
     // Calculate how many rows we can actually display
@@ -228,67 +245,96 @@ pub fn render_terminal_with_offset(
             char_colors.push(fg_color);
         }
 
-        // Draw background cells with non-default colors
+        // Draw backgrounds: merge contiguous selected cells into one rect
+        // to eliminate 1px anti-aliased seams between adjacent cells.
+        let bg_row_y = offset_y + MARGIN + row_idx as f64 * cell_h;
+        {
+            // Non-default backgrounds (per-cell, can't easily merge)
+            for col_idx in 0..cols {
+                let col = Column(col_idx);
+                let cell = &row[col];
+
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                    || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+
+                if !terminal.is_cell_selected(line_num, col_idx)
+                    && cell.bg != TermColor::Named(NamedColor::Background)
+                {
+                    let bx = offset_x + MARGIN + col_idx as f64 * cell_w;
+                    let bg_color = term_color_to_peniko(cell.bg);
+                    let cell_rect = Rect::new(bx, bg_row_y, bx + cell_w, bg_row_y + cell_h);
+                    painter.fill(&cell_rect, bg_color).draw();
+                    if cell.flags.contains(Flags::WIDE_CHAR) && col_idx + 1 < cols {
+                        let sx = offset_x + MARGIN + (col_idx + 1) as f64 * cell_w;
+                        let spacer_rect = Rect::new(sx, bg_row_y, sx + cell_w, bg_row_y + cell_h);
+                        painter.fill(&spacer_rect, bg_color).draw();
+                    }
+                }
+            }
+
+            // Merge contiguous selected cells into single rectangles
+            let mut sel_start: Option<usize> = None;
+            for col_idx in 0..=cols {
+                let is_sel = col_idx < cols && terminal.is_cell_selected(line_num, col_idx);
+                match (sel_start, is_sel) {
+                    (Some(start), true) => {} // continue
+                    (Some(start), false) => {
+                        // End of selection run — draw one merged rect
+                        let bx = offset_x + MARGIN + start as f64 * cell_w;
+                        let ex = offset_x + MARGIN + col_idx as f64 * cell_w;
+                        let sel_rect = Rect::new(bx, bg_row_y, ex, bg_row_y + cell_h);
+                        painter.fill(&sel_rect, colors::BLUE).draw();
+                        sel_start = None;
+                    }
+                    (None, true) => {
+                        sel_start = Some(col_idx);
+                    }
+                    (None, false) => {}
+                }
+            }
+        }
+
+        // Underline / strikethrough
         for col_idx in 0..cols {
             let col = Column(col_idx);
             let cell = &row[col];
-
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
                 || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
             {
                 continue;
             }
-
-            let is_selected = terminal.is_cell_selected(line_num, col_idx);
-            if is_selected {
-                let x = offset_x + MARGIN + col_idx as f64 * cell_w;
-                let bg_color = colors::BLUE;
-                let cell_rect = Rect::new(x, y, x + cell_w, y + cell_h);
-                painter.fill(&cell_rect, bg_color).draw();
-                // For wide characters, also highlight the spacer cell
-                if cell.flags.contains(Flags::WIDE_CHAR) && col_idx + 1 < cols {
-                    let sx = offset_x + MARGIN + (col_idx + 1) as f64 * cell_w;
-                    let spacer_rect = Rect::new(sx, y, sx + cell_w, y + cell_h);
-                    painter.fill(&spacer_rect, bg_color).draw();
-                }
-            } else if cell.bg != TermColor::Named(NamedColor::Background) {
-                let x = offset_x + MARGIN + col_idx as f64 * cell_w;
-                let bg_color = term_color_to_peniko(cell.bg);
-                let cell_rect = Rect::new(x, y, x + cell_w, y + cell_h);
-                painter.fill(&cell_rect, bg_color).draw();
-                if cell.flags.contains(Flags::WIDE_CHAR) && col_idx + 1 < cols {
-                    let sx = offset_x + MARGIN + (col_idx + 1) as f64 * cell_w;
-                    let spacer_rect = Rect::new(sx, y, sx + cell_w, y + cell_h);
-                    painter.fill(&spacer_rect, bg_color).draw();
-                }
-            }
-
-            // Underline
+            let ux = offset_x + MARGIN + col_idx as f64 * cell_w;
             if cell.flags.contains(Flags::UNDERLINE) {
-                let x = offset_x + MARGIN + col_idx as f64 * cell_w;
                 let fg_color = term_color_to_peniko(cell.fg);
-                let ul_rect = Rect::new(x, y + cell_h - 2.0, x + cell_w, y + cell_h);
+                let ul_rect = Rect::new(ux, bg_row_y + cell_h - 2.0, ux + cell_w, bg_row_y + cell_h);
                 painter.fill(&ul_rect, fg_color).draw();
             }
-
-            // Strikethrough
             if cell.flags.contains(Flags::STRIKEOUT) {
-                let x = offset_x + MARGIN + col_idx as f64 * cell_w;
                 let fg_color = term_color_to_peniko(cell.fg);
-                let strike_rect = Rect::new(x, y + cell_h / 2.0 - 1.0, x + cell_w, y + cell_h / 2.0 + 1.0);
+                let strike_rect = Rect::new(ux, bg_row_y + cell_h / 2.0 - 1.0, ux + cell_w, bg_row_y + cell_h / 2.0 + 1.0);
                 painter.fill(&strike_rect, fg_color).draw();
             }
         }
 
-        // Draw cursor block for this row before text (use row y for consistent positioning)
+        // Draw cursor block for this row before text
         if is_active && is_cursor_row && cursor_col < cols as usize {
+            let cursor_cell = &row[Column(cursor_col)];
+            let cursor_w = if cursor_cell.flags.contains(Flags::WIDE_CHAR) {
+                cell_w * 2.0
+            } else {
+                cell_w
+            };
             let cursor_x = offset_x + MARGIN + cursor_col as f64 * cell_w;
-            let cursor_rect = Rect::new(cursor_x, y, cursor_x + cell_w, y + cell_h);
+            let cursor_rect = Rect::new(cursor_x, bg_row_y, cursor_x + cursor_w, bg_row_y + cell_h);
             painter.fill(&cursor_rect, colors::TEXT).draw();
         }
 
-        // Render each non-spacer character at its fixed cell position
-        // This ensures CJK wide chars render at correct width without extra gaps
+        // Render each non-spacer character at its fixed cell position.
+        // All characters share the same baseline (baseline_ascent from the
+        // mixed-script probe) so Latin and CJK glyphs align correctly.
         for col_idx in 0..cols {
             let col = Column(col_idx);
             let cell = &row[col];
@@ -327,12 +373,16 @@ pub fn render_terminal_with_offset(
                 );
                 let mut layout = builder.build(&s);
                 layout.break_all_lines(None);
-                let transform = Affine::translate((x, y));
+                let char_ascent = layout.lines().next().map_or(baseline_ascent, |l| l.metrics().baseline as f64);
+                let ty = y + baseline_ascent - char_ascent;
+                let transform = Affine::translate((x, ty));
                 render_text(painter, transform, &layout, &[Brush::Solid(colors::TEXT), brush], true);
             } else {
                 let mut layout = builder.build(&s);
                 layout.break_all_lines(None);
-                let transform = Affine::translate((x, y));
+                let char_ascent = layout.lines().next().map_or(baseline_ascent, |l| l.metrics().baseline as f64);
+                let ty = y + baseline_ascent - char_ascent;
+                let transform = Affine::translate((x, ty));
                 render_text(painter, transform, &layout, &[Brush::Solid(colors::TEXT)], true);
             }
         }
