@@ -235,24 +235,10 @@ fn tab_bar(state: &App) -> impl WidgetView<App> + use<> {
         label("")
     };
 
-    let window_controls = flex_row((
-        crate::terminal_keyboard::focusless_button(label("  -  ").text_size(12.0).color(TEXT_COLOR), |_| {
-            crate::win_util::minimize_active_window();
-        }),
-        crate::terminal_keyboard::focusless_button(label("  +  ").text_size(12.0).color(TEXT_COLOR), |_| {
-            crate::win_util::maximize_active_window();
-        }),
-        crate::terminal_keyboard::focusless_button(label("  x  ").text_size(12.0).color(Color::from_rgba8(243, 139, 168, 255)), |_| {
-            crate::win_util::close_active_window();
-        }),
-    ));
-
     flex_row((
         flex_row(items),
         add_tab_btn,
         prefix_indicator,
-        crate::terminal_keyboard::drag_area().flex(1.0),
-        window_controls,
     ))
     .background(MANTLE)
     .padding(1.0)
@@ -356,7 +342,7 @@ fn main() {
         app_logic,
         WindowOptions::new("amux - Terminal Multiplexer")
             .with_initial_inner_size(LogicalSize::new(1200.0, 800.0))
-            .with_decorations(false),
+            .with_decorations(true),
     );
 
     app.run_in(EventLoop::with_user_event()).unwrap();
