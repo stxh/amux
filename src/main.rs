@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod group;
 mod keyboard;
 mod pane;
@@ -19,6 +20,7 @@ pub mod win_util {
         fn SendMessageA(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> isize;
         fn ShowWindow(hwnd: *mut c_void, cmd_show: i32) -> i32;
         fn IsZoomed(hwnd: *mut c_void) -> i32;
+        fn GetWindowRect(hwnd: *mut c_void, rect: *mut std::ffi::c_void) -> i32;
     }
 
     const WM_NCLBUTTONDOWN: u32 = 0x00A1;
@@ -62,6 +64,42 @@ pub mod win_util {
     pub fn close_active_window() {
         std::process::exit(0);
     }
+
+    #[repr(C)]
+    struct RECT {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    pub fn get_window_position() -> Option<crate::config::WindowPosition> {
+        unsafe {
+            let hwnd = GetActiveWindow();
+            if hwnd.is_null() {
+                return None;
+            }
+            let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            if GetWindowRect(hwnd, &mut rect as *mut _ as *mut std::ffi::c_void) != 0 {
+                Some(crate::config::WindowPosition {
+                    x: rect.left as f64,
+                    y: rect.top as f64,
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    pub fn is_window_maximized() -> bool {
+        unsafe {
+            let hwnd = GetActiveWindow();
+            if hwnd.is_null() {
+                return false;
+            }
+            IsZoomed(hwnd) != 0
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -71,6 +109,12 @@ pub mod win_util {
     pub fn maximize_active_window() {}
     pub fn close_active_window() {
         std::process::exit(0);
+    }
+    pub fn get_window_position() -> Option<crate::config::WindowPosition> {
+        None
+    }
+    pub fn is_window_maximized() -> bool {
+        false
     }
 }
 
@@ -335,15 +379,27 @@ fn main() {
         )
         .try_init();
 
-    let app_state = App::new();
+    let cfg = config::Config::load();
+    log::info!("Loaded config from {:?}", config::Config::path());
+    log::info!("  font_size: {}, window: {}x{}", cfg.font_size, cfg.window.width, cfg.window.height);
 
-    let app = Xilem::new_simple(
-        app_state,
-        app_logic,
-        WindowOptions::new("amux - Terminal Multiplexer")
-            .with_initial_inner_size(LogicalSize::new(1200.0, 800.0))
-            .with_decorations(true),
-    );
+    let app_state = App::new(cfg.clone());
+
+    let mut win_opts = WindowOptions::new("amux - Terminal Multiplexer")
+        .with_initial_inner_size(LogicalSize::new(cfg.window.width, cfg.window.height))
+        .with_decorations(true)
+        .on_close(|state: &mut App| {
+            state.window_maximized = win_util::is_window_maximized();
+            let pos = win_util::get_window_position();
+            state.save_config(pos);
+        });
+
+    if let Some(pos) = &cfg.window.position {
+        use xilem::dpi::LogicalPosition;
+        win_opts = win_opts.with_initial_position(LogicalPosition::new(pos.x, pos.y));
+    }
+
+    let app = Xilem::new_simple(app_state, app_logic, win_opts);
 
     app.run_in(EventLoop::with_user_event()).unwrap();
 }

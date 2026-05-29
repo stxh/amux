@@ -130,6 +130,7 @@ pub fn render_terminal_with_offset(
     size: Size,
     offset_x: f64,
     offset_y: f64,
+    font_size: f32,
     fcx: &mut xilem::masonry::parley::FontContext,
     lcx: &mut xilem::masonry::parley::LayoutContext<xilem::masonry::core::BrushIndex>,
 ) {
@@ -149,9 +150,6 @@ pub fn render_terminal_with_offset(
     let cursor_col = cursor.column.0;
     let cursor_line_abs = cursor.line.0;
 
-    // Measure actual monospace character width from font metrics
-    const FONT_SIZE: f32 = 18.0;
-
     // Build probe layouts to measure character advance dimensions.
     // Use a Latin-only probe for cell_w and a mixed Latin+CJK probe for
     // cell_h, because CJK fallback fonts (e.g. PingFang on macOS) often have
@@ -163,7 +161,7 @@ pub fn render_terminal_with_offset(
         mb.push_default(StyleProperty::FontFamily(FontFamily::Single(
             FontFamilyName::Generic(GenericFamily::Monospace),
         )));
-        mb.push_default(StyleProperty::FontSize(FONT_SIZE));
+        mb.push_default(StyleProperty::FontSize(font_size));
         let mut ml = mb.build(probe);
         ml.break_all_lines(None);
         ml.width() as f64 / 10.0
@@ -174,7 +172,7 @@ pub fn render_terminal_with_offset(
         mb.push_default(StyleProperty::FontFamily(FontFamily::Single(
             FontFamilyName::Generic(GenericFamily::Monospace),
         )));
-        mb.push_default(StyleProperty::FontSize(FONT_SIZE));
+        mb.push_default(StyleProperty::FontSize(font_size));
         let mut ml = mb.build(probe);
         ml.break_all_lines(None);
         let h = ml.height() as f64;
@@ -363,7 +361,7 @@ pub fn render_terminal_with_offset(
             builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
                 FontFamilyName::Generic(GenericFamily::Monospace),
             )));
-            builder.push_default(StyleProperty::FontSize(FONT_SIZE));
+            builder.push_default(StyleProperty::FontSize(font_size));
 
             if fg_color != colors::TEXT {
                 let brush = Brush::Solid(fg_color);

@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::group::TerminalGroup;
 use crate::pane::Pane;
 use crate::pane_tree::{PaneId, SplitDirection};
@@ -47,6 +48,14 @@ pub struct App {
     pub cell_w: f64,
     /// Monospace font cell height measured during rendering
     pub cell_h: f64,
+    /// Font size in points
+    pub font_size: f64,
+    /// Config reference (for saving on exit)
+    pub user_config: Config,
+    /// Current window inner size (updated on each render)
+    pub window_size: (f64, f64),
+    /// Whether the window is currently maximized
+    pub window_maximized: bool,
     /// System clipboard interface
     pub clipboard: Option<ClipboardContext>,
     /// Timestamp of last mouse click (for multi-click detection)
@@ -64,7 +73,7 @@ impl AppState for App {
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(cfg: Config) -> Self {
         let config = TerminalConfig::default();
 
         // Create first group with one tab and one pane
@@ -89,6 +98,10 @@ impl App {
             show_sidebar: true,
             show_right_sidebar: false,
             hover_pos: None,
+            font_size: cfg.font_size,
+            user_config: cfg,
+            window_size: (0.0, 0.0),
+            window_maximized: false,
             cell_w: 10.0,
             cell_h: 20.0,
             clipboard: ClipboardContext::new().ok(),
@@ -644,6 +657,19 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// Save current state to config file (font_size, window size/position)
+    pub fn save_config(&self, position: Option<crate::config::WindowPosition>) {
+        let mut cfg = self.user_config.clone();
+        cfg.font_size = self.font_size;
+        cfg.window.width = self.window_size.0.max(100.0);
+        cfg.window.height = self.window_size.1.max(100.0);
+        cfg.window.maximized = self.window_maximized;
+        cfg.window.position = position;
+        if let Ok(content) = toml::to_string_pretty(&cfg) {
+            let _ = std::fs::write(crate::config::Config::path(), content);
         }
     }
 

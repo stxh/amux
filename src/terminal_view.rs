@@ -15,6 +15,8 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
     canvas(move |state: &mut App, ctx, scene, available_size| {
         // Capture redraw_counter to force closure state change and widget rebuild
         let _ = redraw_counter;
+        // Track window size for config saving
+        state.window_size = (available_size.width, available_size.height);
         use xilem::masonry::imaging::Painter;
         let mut painter = Painter::new(scene);
 
@@ -37,6 +39,7 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
         // Use a mixed Latin+CJK probe for cell_h so CJK fallback fonts
         // (e.g. PingFang on macOS) with taller metrics are accommodated,
         // preventing Chinese glyph overflow in selection highlighting.
+        let font_size = state.font_size as f32;
         use xilem::masonry::parley::style::{StyleProperty, FontFamily, FontFamilyName, GenericFamily};
         let cell_w = {
             let probe = "MMMMMMMMMM";
@@ -44,7 +47,7 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
             mb.push_default(StyleProperty::FontFamily(FontFamily::Single(
                 FontFamilyName::Generic(GenericFamily::Monospace),
             )));
-            mb.push_default(StyleProperty::FontSize(18.0));
+            mb.push_default(StyleProperty::FontSize(font_size));
             let mut ml = mb.build(probe);
             ml.break_all_lines(None);
             ml.width() as f64 / 10.0
@@ -55,7 +58,7 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
             mb.push_default(StyleProperty::FontFamily(FontFamily::Single(
                 FontFamilyName::Generic(GenericFamily::Monospace),
             )));
-            mb.push_default(StyleProperty::FontSize(18.0));
+            mb.push_default(StyleProperty::FontSize(font_size));
             let mut ml = mb.build(probe);
             ml.break_all_lines(None);
             ml.height() as f64
@@ -102,6 +105,7 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
                     pane_size,
                     rect.x,
                     rect.y,
+                    font_size,
                     fcx,
                     lcx,
                 );

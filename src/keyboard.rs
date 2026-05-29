@@ -249,17 +249,20 @@ pub fn handle_key_input(app: &mut App, key: &str, ctrl: bool, alt: bool, shift: 
         return true;
     }
     if ctrl && !shift && !alt && (key == "+" || key == "=") {
-        app.status_message = "Increase font size".to_string();
+        app.font_size = (app.font_size + 1.0).min(72.0);
+        app.status_message = format!("Font size: {}", app.font_size);
         app.redraw_counter += 1;
         return true;
     }
     if ctrl && !shift && !alt && key == "-" {
-        app.status_message = "Decrease font size".to_string();
+        app.font_size = (app.font_size - 1.0).max(6.0);
+        app.status_message = format!("Font size: {}", app.font_size);
         app.redraw_counter += 1;
         return true;
     }
     if ctrl && !shift && !alt && key == "0" {
-        app.status_message = "Reset font size".to_string();
+        app.font_size = 18.0;
+        app.status_message = "Font size: 18".to_string();
         app.redraw_counter += 1;
         return true;
     }

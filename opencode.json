@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    "context-mode"
+  ],
+  "mcp": {
+    "agentmemory": {
+      "type": "local",
+      "command": ["bunx", "@agentmemory/mcp"],
+      "enabled": true
+    }
+  },
+  "command": {
+    "recall": {
+      "description": "Search past session observations and lessons for relevant context.",
+      "prompt": "Search for observations and lessons matching the user's query. Call `memory_smart_search` with the query and limit:10, and `memory_lesson_recall` with the query and limit:5. Combine results: group observations by session, show type/title/narrative for each, highlight importance >= 7, show lessons separately with confidence scores. If no results, suggest 2-3 alternative search terms. Never hallucinate results — only present what the MCP tools actually return."
+    }
+  }
+}

@@ -1,6 +1,6 @@
 [package]
 name = "amux"
-version = "0.0.9"
+version = "0.3.1"
 edition = "2021"
 description = "A cross-platform terminal multiplexer combining Alacritty terminal backend with Xilem/Vello GPU-accelerated rendering"
 
@@ -29,6 +29,11 @@ tokio = { version = "1", features = ["time", "rt"] }
 winit = "0.30"
 notify-rust = "4"
 copypasta = "0.10.2"
+
+# Config file (TOML)
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "6"
 
 # Force std feature for rustix 0.38 which rustix-openpty disables, causing
 # type mismatch between rustix::fd::OwnedFd and std::os::fd::OwnedFd.
