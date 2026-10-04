@@ -1,12 +1,11 @@
 /// Terminal canvas rendering - renders terminal grid onto a canvas surface
 ///
-/// This module provides functions to render terminal grids using Xilem's canvas pattern.
-/// Supports per-character foreground/background coloring using parley's ranged_builder.
+/// This module renders libghostty-vt render-state snapshots using Xilem's
+/// canvas pattern. Supports per-character foreground/background coloring
+/// using parley's ranged_builder.
 
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor, Rgb};
+use libghostty_vt::screen::CellWide;
+use libghostty_vt::style::{RgbColor, Underline};
 
 use xilem::masonry::core::render_text;
 use xilem::masonry::imaging::{Painter, record::Scene};
@@ -21,111 +20,54 @@ use crate::terminal::Terminal;
 mod colors {
     use super::Color;
     pub const CRUST:     Color = Color::from_rgba8(0x11, 0x11, 0x1b, 0xff);
-    pub const SURFACE0:  Color = Color::from_rgba8(0x31, 0x32, 0x44, 0xff);
     pub const SURFACE1:  Color = Color::from_rgba8(0x45, 0x47, 0x5a, 0xff);
     pub const TEXT:      Color = Color::from_rgba8(0xc6, 0xd0, 0xf5, 0xff);
     pub const BLUE:      Color = Color::from_rgba8(0x89, 0xb4, 0xfa, 0xff);
-    pub const ROSEWATER: Color = Color::from_rgba8(0xf5, 0xe0, 0xdc, 0xff);
 
     // Sleek dimmed border colors
     pub const ACTIVE_BORDER:   Color = Color::from_rgba8(0x3b, 0x59, 0x7f, 0xff); // Classy muted steel blue
     pub const INACTIVE_BORDER: Color = Color::from_rgba8(0x22, 0x22, 0x30, 0xff); // Elegant subtle dark grey
 }
 
-/// Convert alacritty TermColor to peniko Color
-fn term_color_to_peniko(color: TermColor) -> Color {
-    let rgb = match color {
-        TermColor::Named(named) => {
-            match named {
-                NamedColor::Black => Rgb { r: 0x45, g: 0x47, b: 0x5a },
-                NamedColor::Red => Rgb { r: 0xf3, g: 0x8b, b: 0xa8 },
-                NamedColor::Green => Rgb { r: 0xa6, g: 0xe3, b: 0xa1 },
-                NamedColor::Yellow => Rgb { r: 0xf9, g: 0xe2, b: 0xaf },
-                NamedColor::Blue => Rgb { r: 0x89, g: 0xb4, b: 0xfa },
-                NamedColor::Magenta => Rgb { r: 0xcb, g: 0xb6, b: 0xff },
-                NamedColor::Cyan => Rgb { r: 0x94, g: 0xe2, b: 0xd5 },
-                NamedColor::White => Rgb { r: 0xc6, g: 0xd0, b: 0xf5 },
-                NamedColor::BrightBlack => Rgb { r: 0x58, g: 0x5b, b: 0x70 },
-                NamedColor::BrightRed => Rgb { r: 0xf3, g: 0x8b, b: 0xa8 },
-                NamedColor::BrightGreen => Rgb { r: 0xa6, g: 0xe3, b: 0xa1 },
-                NamedColor::BrightYellow => Rgb { r: 0xf9, g: 0xe2, b: 0xaf },
-                NamedColor::BrightBlue => Rgb { r: 0x89, g: 0xb4, b: 0xfa },
-                NamedColor::BrightMagenta => Rgb { r: 0xcb, g: 0xb6, b: 0xff },
-                NamedColor::BrightCyan => Rgb { r: 0x94, g: 0xe2, b: 0xd5 },
-                NamedColor::BrightWhite => Rgb { r: 0xc6, g: 0xd0, b: 0xf5 },
-                NamedColor::Foreground => Rgb { r: 0xc6, g: 0xd0, b: 0xf5 },
-                NamedColor::Background => Rgb { r: 0x1e, g: 0x1e, b: 0x2e },
-                _ => Rgb { r: 0xc6, g: 0xd0, b: 0xf5 },
-            }
-        }
-        TermColor::Spec(rgb) => rgb,
-        TermColor::Indexed(idx) => {
-            if idx < 8 {
-                const COLORS: [(u8, u8, u8); 8] = [
-                    (0x45, 0x47, 0x5a), (0xf3, 0x8b, 0xa8), (0xa6, 0xe3, 0xa1), (0xf9, 0xe2, 0xaf),
-                    (0x89, 0xb4, 0xfa), (0xcb, 0xb6, 0xff), (0x94, 0xe2, 0xd5), (0xc6, 0xd0, 0xf5),
-                ];
-                let (r, g, b) = COLORS[idx as usize];
-                Rgb { r, g, b }
-            } else if idx < 16 {
-                let (r, g, b) = match idx - 8 {
-                    0 => (0x58, 0x5b, 0x70), 1 => (0xf3, 0x8b, 0xa8), 2 => (0xa6, 0xe3, 0xa1),
-                    3 => (0xf9, 0xe2, 0xaf), 4 => (0x89, 0xb4, 0xfa), 5 => (0xcb, 0xb6, 0xff),
-                    6 => (0x94, 0xe2, 0xd5), 7 => (0xc6, 0xd0, 0xf5),
-                    _ => (0xc6, 0xd0, 0xf5),
-                };
-                Rgb { r, g, b }
-            } else if idx < 232 {
-                let ci = idx - 16;
-                let r = (ci / 36) * 51;
-                let g = ((ci % 36) / 6) * 51;
-                let b = (ci % 6) * 51;
-                Rgb { r, g, b }
-            } else {
-                let gray = 8 + (idx - 232) * 10;
-                Rgb { r: gray, g: gray, b: gray }
-            }
-        }
-    };
-    Color::from_rgba8(rgb.r, rgb.g, rgb.b, 0xff)
+fn rgb_to_color(c: RgbColor) -> Color {
+    Color::from_rgba8(c.r, c.g, c.b, 0xff)
 }
 
-/// Check if a color is the default foreground
-fn is_default_fg(color: TermColor) -> bool {
-    matches!(color, TermColor::Named(NamedColor::Foreground))
-}
-
-/// Terminal pane state (maintained separately from the terminal itself)
+/// Terminal pane state (maintained separately from the terminal itself).
+/// Scrolling is now owned by the ghostty engine, so there is no app-side
+/// scroll offset anymore.
 #[derive(Clone)]
 pub struct TerminalPaneState {
-    /// Scroll offset from bottom of history
-    pub scroll_offset: usize,
+    _private: (),
 }
 
 impl TerminalPaneState {
     pub fn new() -> Self {
-        Self {
-            scroll_offset: 0,
-        }
+        Self { _private: () }
     }
 }
 
-/// A color segment within a row — contiguous characters sharing the same fg color
-struct ColorSegment {
-    start_byte: usize,
-    end_byte: usize,
-    color: Color,
+/// Per-cell data collected for one viewport row.
+struct CellDraw {
+    x: usize,
+    text: String,
+    fg: Color,
+    bg: Option<Color>,
+    wide: bool,
+    is_spacer: bool,
+    selected: bool,
+    underline: bool,
+    strikethrough: bool,
 }
 
 /// Render a terminal onto a canvas with an offset
 ///
 /// This function renders a terminal at a specific position within the canvas,
 /// allowing multiple panes to be rendered in their layout positions.
-/// Now supports per-character foreground coloring via parley's ranged_builder.
 pub fn render_terminal_with_offset(
     painter: &mut Painter<'_, Scene>,
     terminal: &Terminal,
-    pane_state: &TerminalPaneState,
+    _pane_state: &TerminalPaneState,
     is_active: bool,
     size: Size,
     offset_x: f64,
@@ -139,16 +81,6 @@ pub fn render_terminal_with_offset(
     // Background for this pane
     let rect = Rect::new(offset_x, offset_y, offset_x + size.width, offset_y + size.height);
     painter.fill(&rect, colors::CRUST).draw();
-
-    let grid = terminal.grid();
-    let display_offset = terminal.display_offset() + pane_state.scroll_offset;
-    let cols = grid.columns();
-    let total_lines = grid.total_lines();
-    let screen_lines = grid.screen_lines();
-
-    let cursor = terminal.cursor();
-    let cursor_col = cursor.column.0;
-    let cursor_line_abs = cursor.line.0;
 
     // Build probe layouts to measure character advance dimensions.
     // Use a Latin-only probe for cell_w and a mixed Latin+CJK probe for
@@ -182,182 +114,199 @@ pub fn render_terminal_with_offset(
         (h, ascent)
     };
 
-    // Calculate how many rows we can actually display
     let max_displayable_rows = ((size.height - 2.0 * MARGIN).max(0.0) / cell_h).floor() as usize;
-    let display_lines = screen_lines.min(max_displayable_rows);
 
-    // Render visible rows
-    for row_idx in 0..display_lines {
+    // Grab the engine (UI thread owns it). Read scrollbar state before the
+    // snapshot keeps the render state borrowed. Rebind to a plain `&mut Engine`
+    // so disjoint field borrows (render/term/rows/cells) work through one
+    // deref instead of re-borrowing the RefMut on every field access.
+    let mut guard = terminal.engine();
+    let (sb_total, sb_offset, sb_len) = match guard.term.scrollbar() {
+        Ok(s) => (s.total, s.offset, s.len),
+        Err(_) => (0, 0, 0),
+    };
+    let eng = &mut *guard;
+
+    let Ok(snapshot) = eng.render.update(&eng.term) else {
+        return;
+    };
+    let cols = snapshot.cols().unwrap_or(0) as usize;
+    let rows = snapshot.rows().unwrap_or(0) as usize;
+    let display_lines = rows.min(max_displayable_rows);
+
+    let term_colors = snapshot.colors().ok();
+    let default_fg = term_colors
+        .as_ref()
+        .map(|c| rgb_to_color(c.foreground))
+        .unwrap_or(colors::TEXT);
+    let cursor_visible = snapshot.cursor_visible().unwrap_or(false);
+    let cursor_vp = snapshot.cursor_viewport().ok().flatten();
+    let cursor_brush = snapshot
+        .cursor_color()
+        .ok()
+        .flatten()
+        .map(rgb_to_color)
+        .or_else(|| term_colors.as_ref().and_then(|c| c.cursor).map(rgb_to_color))
+        .unwrap_or(colors::TEXT);
+
+    let Ok(mut row_iter) = eng.rows.update(&snapshot) else {
+        return;
+    };
+
+    let mut row_idx: usize = 0;
+    while let Some(row) = row_iter.next() {
+        if row_idx >= display_lines {
+            break;
+        }
         let y = offset_y + MARGIN + row_idx as f64 * cell_h;
-        let line_num = row_idx as i32 - display_offset as i32;
-        let line = Line(line_num);
+        let bg_row_y = y;
 
-        // Compute cursor row match once per row
-        let cursor_screen_row = cursor_line_abs + display_offset as i32;
-        let is_cursor_row = cursor_screen_row == row_idx as i32;
+        let row_sel = row.selection().ok().flatten();
+        let cursor_on_row = is_active
+            && cursor_visible
+            && cursor_vp.map(|c| c.y as usize == row_idx).unwrap_or(false);
 
-        // Skip lines that are out of bounds
-        if line_num < grid.topmost_line().0 {
-            continue;
+        // Collect this row's cells.
+        let mut cells: Vec<CellDraw> = Vec::with_capacity(cols);
+        if let Ok(mut cell_iter) = eng.cells.update(row) {
+            let mut x: usize = 0;
+            while let Some(c) = cell_iter.next() {
+                if x >= cols {
+                    break;
+                }
+                let wide_kind = c
+                    .raw_cell()
+                    .ok()
+                    .and_then(|r| r.wide().ok())
+                    .unwrap_or(CellWide::Narrow);
+                let is_spacer = matches!(wide_kind, CellWide::SpacerTail | CellWide::SpacerHead);
+                let wide = matches!(wide_kind, CellWide::Wide);
+
+                let has_text = c.raw_cell().ok().and_then(|r| r.has_text().ok()).unwrap_or(false);
+                let graphemes = c.graphemes().unwrap_or_default();
+                let text: String = graphemes.into_iter().filter(|ch| !ch.is_control()).collect();
+
+                let fg = c.fg_color().ok().flatten().map(rgb_to_color).unwrap_or(default_fg);
+                let bg = c.bg_color().ok().flatten().map(rgb_to_color);
+
+                let mut underline = false;
+                let mut strikethrough = false;
+                if c.has_styling().unwrap_or(false) {
+                    if let Ok(style) = c.style() {
+                        underline = style.underline != Underline::None;
+                        strikethrough = style.strikethrough;
+                    }
+                }
+
+                let selected = row_sel
+                    .map(|s| x as u16 >= s.start_x && x as u16 <= s.end_x)
+                    .unwrap_or(false);
+
+                cells.push(CellDraw {
+                    x,
+                    text: if has_text { text } else { String::new() },
+                    fg,
+                    bg,
+                    wide,
+                    is_spacer,
+                    selected,
+                    underline,
+                    strikethrough,
+                });
+                x += 1;
+            }
         }
 
-        let row = &grid[line];
-
-        // Build text string and collect per-character color info
-        let mut row_text = String::with_capacity(cols);
-        let mut char_colors: Vec<Color> = Vec::with_capacity(cols);
-
-        for col_idx in 0..cols {
-            let col = Column(col_idx);
-            let cell = &row[col];
-
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-                || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-            {
-                row_text.push(' ');
-                char_colors.push(colors::TEXT);
+        // Cell backgrounds (skip default bg and selected cells; wide cells
+        // paint their trailing spacer too).
+        for cell in &cells {
+            if cell.is_spacer || cell.selected || cell.bg.is_none() {
                 continue;
             }
-
-            let ch = match cell.c {
-                '\0' => ' ',
-                c if c.is_control() && c != '\t' => ' ',
-                c => c,
-            };
-            row_text.push(ch);
-
-            // Determine foreground color for this character
-            let mut fg_color = if is_default_fg(cell.fg) {
-                colors::TEXT
-            } else {
-                term_color_to_peniko(cell.fg)
-            };
-
-            // If this is the cursor cell, invert colors (cursor bg is TEXT, text fg is CRUST)
-            if is_active && is_cursor_row && col_idx == cursor_col {
-                fg_color = colors::CRUST;
-            } else if terminal.is_cell_selected(line_num, col_idx) {
-                fg_color = colors::CRUST;
-            }
-
-            char_colors.push(fg_color);
+            let bx = offset_x + MARGIN + cell.x as f64 * cell_w;
+            let w = if cell.wide { cell_w * 2.0 } else { cell_w };
+            let bg_color = cell.bg.unwrap();
+            let cell_rect = Rect::new(bx, bg_row_y, bx + w, bg_row_y + cell_h);
+            painter.fill(&cell_rect, bg_color).draw();
         }
 
-        // Draw backgrounds: merge contiguous selected cells into one rect
-        // to eliminate 1px anti-aliased seams between adjacent cells.
-        let bg_row_y = offset_y + MARGIN + row_idx as f64 * cell_h;
-        {
-            // Non-default backgrounds (per-cell, can't easily merge)
-            for col_idx in 0..cols {
-                let col = Column(col_idx);
-                let cell = &row[col];
-
-                if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-                    || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    continue;
-                }
-
-                if !terminal.is_cell_selected(line_num, col_idx)
-                    && cell.bg != TermColor::Named(NamedColor::Background)
-                {
-                    let bx = offset_x + MARGIN + col_idx as f64 * cell_w;
-                    let bg_color = term_color_to_peniko(cell.bg);
-                    let cell_rect = Rect::new(bx, bg_row_y, bx + cell_w, bg_row_y + cell_h);
-                    painter.fill(&cell_rect, bg_color).draw();
-                    if cell.flags.contains(Flags::WIDE_CHAR) && col_idx + 1 < cols {
-                        let sx = offset_x + MARGIN + (col_idx + 1) as f64 * cell_w;
-                        let spacer_rect = Rect::new(sx, bg_row_y, sx + cell_w, bg_row_y + cell_h);
-                        painter.fill(&spacer_rect, bg_color).draw();
-                    }
-                }
-            }
-
-            // Merge contiguous selected cells into single rectangles
-            let mut sel_start: Option<usize> = None;
-            for col_idx in 0..=cols {
-                let is_sel = col_idx < cols && terminal.is_cell_selected(line_num, col_idx);
-                match (sel_start, is_sel) {
-                    (Some(start), true) => {} // continue
-                    (Some(start), false) => {
-                        // End of selection run — draw one merged rect
-                        let bx = offset_x + MARGIN + start as f64 * cell_w;
-                        let ex = offset_x + MARGIN + col_idx as f64 * cell_w;
-                        let sel_rect = Rect::new(bx, bg_row_y, ex, bg_row_y + cell_h);
-                        painter.fill(&sel_rect, colors::BLUE).draw();
-                        sel_start = None;
-                    }
-                    (None, true) => {
-                        sel_start = Some(col_idx);
-                    }
-                    (None, false) => {}
-                }
+        // Selection: one merged rect per row-local range to avoid seams.
+        if cols > 0 {
+            if let Some(sel) = row_sel {
+                let start = (sel.start_x as usize).min(cols - 1);
+                let end = (sel.end_x as usize).min(cols - 1);
+                let bx = offset_x + MARGIN + start as f64 * cell_w;
+                let ex = offset_x + MARGIN + (end + 1) as f64 * cell_w;
+                let sel_rect = Rect::new(bx, bg_row_y, ex, bg_row_y + cell_h);
+                painter.fill(&sel_rect, colors::BLUE).draw();
             }
         }
 
         // Underline / strikethrough
-        for col_idx in 0..cols {
-            let col = Column(col_idx);
-            let cell = &row[col];
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-                || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-            {
+        for cell in &cells {
+            if cell.is_spacer || (!cell.underline && !cell.strikethrough) {
                 continue;
             }
-            let ux = offset_x + MARGIN + col_idx as f64 * cell_w;
-            if cell.flags.contains(Flags::UNDERLINE) {
-                let fg_color = term_color_to_peniko(cell.fg);
-                let ul_rect = Rect::new(ux, bg_row_y + cell_h - 2.0, ux + cell_w, bg_row_y + cell_h);
-                painter.fill(&ul_rect, fg_color).draw();
+            let ux = offset_x + MARGIN + cell.x as f64 * cell_w;
+            let w = if cell.wide { cell_w * 2.0 } else { cell_w };
+            if cell.underline {
+                let ul_rect = Rect::new(ux, bg_row_y + cell_h - 2.0, ux + w, bg_row_y + cell_h);
+                painter.fill(&ul_rect, cell.fg).draw();
             }
-            if cell.flags.contains(Flags::STRIKEOUT) {
-                let fg_color = term_color_to_peniko(cell.fg);
-                let strike_rect = Rect::new(ux, bg_row_y + cell_h / 2.0 - 1.0, ux + cell_w, bg_row_y + cell_h / 2.0 + 1.0);
-                painter.fill(&strike_rect, fg_color).draw();
+            if cell.strikethrough {
+                let strike_rect = Rect::new(
+                    ux,
+                    bg_row_y + cell_h / 2.0 - 1.0,
+                    ux + w,
+                    bg_row_y + cell_h / 2.0 + 1.0,
+                );
+                painter.fill(&strike_rect, cell.fg).draw();
             }
         }
 
-        // Draw cursor block for this row before text
-        if is_active && is_cursor_row && cursor_col < cols as usize {
-            let cursor_cell = &row[Column(cursor_col)];
-            let cursor_w = if cursor_cell.flags.contains(Flags::WIDE_CHAR) {
-                cell_w * 2.0
-            } else {
-                cell_w
-            };
-            let cursor_x = offset_x + MARGIN + cursor_col as f64 * cell_w;
-            let cursor_rect = Rect::new(cursor_x, bg_row_y, cursor_x + cursor_w, bg_row_y + cell_h);
-            painter.fill(&cursor_rect, colors::TEXT).draw();
+        // Cursor block (viewport-relative position from the snapshot).
+        let cursor_cell_x = if cursor_on_row {
+            cursor_vp.map(|c| {
+                let mut cx = c.x as usize;
+                if c.at_wide_tail && cx > 0 {
+                    cx -= 1;
+                }
+                cx
+            })
+        } else {
+            None
+        };
+        if let Some(cx) = cursor_cell_x {
+            if cx < cols {
+                let cursor_w = cells
+                    .iter()
+                    .find(|c| c.x == cx)
+                    .map(|c| if c.wide { cell_w * 2.0 } else { cell_w })
+                    .unwrap_or(cell_w);
+                let cursor_x = offset_x + MARGIN + cx as f64 * cell_w;
+                let cursor_rect = Rect::new(cursor_x, bg_row_y, cursor_x + cursor_w, bg_row_y + cell_h);
+                painter.fill(&cursor_rect, cursor_brush).draw();
+            }
         }
 
-        // Render each non-spacer character at its fixed cell position.
+        // Render each character at its fixed cell position.
         // All characters share the same baseline (baseline_ascent from the
         // mixed-script probe) so Latin and CJK glyphs align correctly.
-        for col_idx in 0..cols {
-            let col = Column(col_idx);
-            let cell = &row[col];
-
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-                || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-            {
+        for cell in &cells {
+            if cell.is_spacer || cell.text.is_empty() {
                 continue;
             }
 
-            let ch = match cell.c {
-                '\0' => ' ',
-                c if c.is_control() && c != '\t' => ' ',
-                c => c,
+            let is_cursor_cell = cursor_cell_x == Some(cell.x);
+            let fg_color = if is_cursor_cell || cell.selected {
+                colors::CRUST
+            } else {
+                cell.fg
             };
+            let x = offset_x + MARGIN + cell.x as f64 * cell_w;
 
-            if ch == ' ' {
-                continue;
-            }
-
-            let fg_color = char_colors[col_idx];
-            let x = offset_x + MARGIN + col_idx as f64 * cell_w;
-
-            let s = ch.to_string();
-            let mut builder = lcx.ranged_builder(fcx, &s, 1.0, true);
+            let s = &cell.text;
+            let mut builder = lcx.ranged_builder(fcx, s, 1.0, true);
             builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
                 FontFamilyName::Generic(GenericFamily::Monospace),
             )));
@@ -369,14 +318,14 @@ pub fn render_terminal_with_offset(
                     StyleProperty::Brush(xilem::masonry::core::BrushIndex(1)),
                     0..s.len(),
                 );
-                let mut layout = builder.build(&s);
+                let mut layout = builder.build(s);
                 layout.break_all_lines(None);
                 let char_ascent = layout.lines().next().map_or(baseline_ascent, |l| l.metrics().baseline as f64);
                 let ty = y + baseline_ascent - char_ascent;
                 let transform = Affine::translate((x, ty));
                 render_text(painter, transform, &layout, &[Brush::Solid(colors::TEXT), brush], true);
             } else {
-                let mut layout = builder.build(&s);
+                let mut layout = builder.build(s);
                 layout.break_all_lines(None);
                 let char_ascent = layout.lines().next().map_or(baseline_ascent, |l| l.metrics().baseline as f64);
                 let ty = y + baseline_ascent - char_ascent;
@@ -384,7 +333,13 @@ pub fn render_terminal_with_offset(
                 render_text(painter, transform, &layout, &[Brush::Solid(colors::TEXT)], true);
             }
         }
+
+        row_idx += 1;
     }
+
+    // Drop snapshot/iterators before releasing the engine borrow scope.
+    drop(row_iter);
+
     // Border
     let border_color = if is_active { colors::ACTIVE_BORDER } else { colors::INACTIVE_BORDER };
     let border = Stroke::new(2.0);
@@ -398,65 +353,21 @@ pub fn render_terminal_with_offset(
         // Track background (semi-transparent)
         painter.fill(&track_rect, Color::from_rgba8(0x18, 0x18, 0x25, 0x80)).draw();
 
-        // Thumb — size proportional to viewport/total, position proportional to scroll offset
-        if total_lines > 0 {
+        // Thumb — size proportional to viewport/total, position from engine scrollbar offset
+        if sb_total > 0 {
             let scrollable_h = size.height - 2.0 * MARGIN;
-            let viewport_ratio = (screen_lines as f64 / total_lines as f64).min(1.0);
+            let viewport_ratio = (sb_len as f64 / sb_total as f64).min(1.0);
             let thumb_h = (scrollable_h * viewport_ratio).max(20.0);
 
-            // Current view position within total scrollable range
-            let max_scroll = (total_lines as isize - screen_lines as isize).max(0) as f64;
+            let max_scroll = sb_total.saturating_sub(sb_len) as f64;
             let scroll_progress = if max_scroll > 0.0 {
-                1.0 - (pane_state.scroll_offset as f64 / max_scroll)
+                (sb_offset as f64 / max_scroll).clamp(0.0, 1.0)
             } else {
-                1.0
+                0.0
             };
-            let thumb_y = offset_y + MARGIN + (scrollable_h - thumb_h) * scroll_progress.clamp(0.0, 1.0);
+            let thumb_y = offset_y + MARGIN + (scrollable_h - thumb_h) * scroll_progress;
             let thumb_rect = Rect::new(track_x + 1.0, thumb_y, track_x + track_width - 1.0, thumb_y + thumb_h);
             painter.fill(&thumb_rect, colors::SURFACE1).draw();
         }
     }
-}
-
-/// Build color segments by merging consecutive characters with the same foreground color.
-/// Returns byte-range segments for use with parley's ranged_builder.
-fn build_color_segments(text: &str, char_colors: &[Color]) -> Vec<ColorSegment> {
-    let mut segments = Vec::new();
-    if char_colors.is_empty() {
-        return segments;
-    }
-
-    let mut current_color = char_colors[0];
-    let mut start_byte = 0usize;
-    let mut char_idx = 0;
-    let mut byte_pos = 0usize;
-
-    for ch in text.chars() {
-        let ch_len = ch.len_utf8();
-
-        if char_idx < char_colors.len() && char_colors[char_idx] != current_color {
-            // End previous segment
-            segments.push(ColorSegment {
-                start_byte,
-                end_byte: byte_pos,
-                color: current_color,
-            });
-            current_color = char_colors[char_idx];
-            start_byte = byte_pos;
-        }
-
-        byte_pos += ch_len;
-        char_idx += 1;
-    }
-
-    // Final segment
-    if byte_pos > start_byte {
-        segments.push(ColorSegment {
-            start_byte,
-            end_byte: byte_pos,
-            color: current_color,
-        });
-    }
-
-    segments
 }
