@@ -1,11 +1,10 @@
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::grid::Grid;
-use alacritty_terminal::grid::Scroll;
-use alacritty_terminal::index::Point;
-use alacritty_terminal::term::Term;
-use alacritty_terminal::term::cell::Cell;
-use alacritty_terminal::vte::ansi::Processor;
+use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
+use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
+use libghostty_vt::style::{Palette, RgbColor};
+use libghostty_vt::terminal::{Options as TerminalOptions, Point, PointCoordinate, ScrollViewport};
+use libghostty_vt::Terminal as GhosttyTerminal;
 use portable_pty::{Child, MasterPty, PtySize};
+use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -32,110 +31,141 @@ impl Default for TerminalConfig {
     }
 }
 
-/// Terminal size info implementing Dimensions trait
-struct TermDimensions {
-    columns: u16,
-    lines: u16,
+const MAX_SCROLLBACK: usize = 10000;
+
+/// Catppuccin Mocha 256-color palette injected into the engine so it is
+/// the single source of truth for colors (OSC 4/10/11 then work naturally).
+fn catppuccin_palette() -> Palette {
+    let ansi16: [(u8, u8, u8); 16] = [
+        (0x45, 0x47, 0x5a), (0xf3, 0x8b, 0xa8), (0xa6, 0xe3, 0xa1), (0xf9, 0xe2, 0xaf),
+        (0x89, 0xb4, 0xfa), (0xcb, 0xb6, 0xff), (0x94, 0xe2, 0xd5), (0xc6, 0xd0, 0xf5),
+        (0x58, 0x5b, 0x70), (0xf3, 0x8b, 0xa8), (0xa6, 0xe3, 0xa1), (0xf9, 0xe2, 0xaf),
+        (0x89, 0xb4, 0xfa), (0xcb, 0xb6, 0xff), (0x94, 0xe2, 0xd5), (0xc6, 0xd0, 0xf5),
+    ];
+    let mut entries = [RgbColor { r: 0, g: 0, b: 0 }; 256];
+    for (i, c) in ansi16.iter().enumerate() {
+        entries[i] = RgbColor { r: c.0, g: c.1, b: c.2 };
+    }
+    for i in 0..216u32 {
+        entries[16 + i as usize] = RgbColor {
+            r: ((i / 36) * 51) as u8,
+            g: (((i % 36) / 6) * 51) as u8,
+            b: ((i % 6) * 51) as u8,
+        };
+    }
+    for i in 0..24u32 {
+        let gray = (8 + i * 10) as u8;
+        entries[232 + i as usize] = RgbColor { r: gray, g: gray, b: gray };
+    }
+    Palette(entries)
 }
 
-impl alacritty_terminal::grid::Dimensions for TermDimensions {
-    fn columns(&self) -> usize {
-        self.columns as usize
-    }
-
-    fn total_lines(&self) -> usize {
-        self.lines as usize
-    }
-
-    fn screen_lines(&self) -> usize {
-        self.lines as usize
-    }
+/// Ghostty engine + render state, owned by the UI thread.
+pub(crate) struct Engine {
+    pub term: GhosttyTerminal<'static, 'static>,
+    pub render: RenderState<'static>,
+    pub rows: RowIterator<'static>,
+    pub cells: CellIterator<'static>,
 }
 
-/// Wraps alacritty_terminal's Term with PTY I/O
+/// Wraps libghostty-vt's Terminal with PTY I/O.
+///
+/// The Ghostty terminal is `!Send`, so it is owned by the UI thread inside a
+/// `RefCell`. The PTY reader thread only pushes raw byte chunks through a
+/// channel; the UI thread feeds them via [`Terminal::check_and_clear_redraw`].
 pub struct Terminal {
-    term: Arc<Mutex<Term<TerminalEventListener>>>,
+    engine: RefCell<Engine>,
     pty_master: Option<Box<dyn MasterPty + Send>>,
     child: Option<Box<dyn Child + Send>>,
-    pty_reader: Option<Box<dyn Read + Send>>,
-    pty_writer: Option<Box<dyn Write + Send>>,
+    pty_writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    pty_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
     config: TerminalConfig,
-    event_receiver: mpsc::Receiver<alacritty_terminal::event::Event>,
     needs_redraw: Arc<Mutex<bool>>,
     pub redraw_notifier: Arc<Mutex<Option<xilem::core::MessageProxy<()>>>>,
     pub title: Arc<Mutex<Option<String>>>,
-}
-
-/// Event listener for terminal state changes
-pub struct TerminalEventListener {
-    sender: Option<mpsc::Sender<alacritty_terminal::event::Event>>,
-    title: Arc<Mutex<Option<String>>>,
-    redraw_notifier: Arc<Mutex<Option<xilem::core::MessageProxy<()>>>>,
-}
-
-impl alacritty_terminal::event::EventListener for TerminalEventListener {
-    fn send_event(&self, event: alacritty_terminal::event::Event) {
-        match &event {
-            alacritty_terminal::event::Event::Title(t) => {
-                if let Ok(mut title) = self.title.lock() {
-                    *title = Some(t.clone());
-                }
-                if let Some(proxy) = &*self.redraw_notifier.lock().unwrap() {
-                    let _ = proxy.message(());
-                }
-            }
-            alacritty_terminal::event::Event::ResetTitle => {
-                if let Ok(mut title) = self.title.lock() {
-                    *title = None;
-                }
-                if let Some(proxy) = &*self.redraw_notifier.lock().unwrap() {
-                    let _ = proxy.message(());
-                }
-            }
-            _ => {}
-        }
-        if let Some(sender) = &self.sender {
-            let _ = sender.send(event);
-        }
-    }
+    sel_anchor: Option<Point>,
 }
 
 impl Terminal {
     pub fn new(config: &TerminalConfig) -> Self {
-        let dimensions = TermDimensions {
-            columns: config.cols,
-            lines: config.rows,
-        };
-
-        let (event_sender, event_receiver) = mpsc::channel();
         let needs_redraw = Arc::new(Mutex::new(false));
         let title = Arc::new(Mutex::new(None));
-        let redraw_notifier = Arc::new(Mutex::new(None));
+        let redraw_notifier: Arc<Mutex<Option<xilem::core::MessageProxy<()>>>> =
+            Arc::new(Mutex::new(None));
+        let pty_writer: Arc<Mutex<Option<Box<dyn Write + Send>>>> = Arc::new(Mutex::new(None));
+        let (_, rx) = mpsc::channel::<Vec<u8>>();
 
-        let listener = TerminalEventListener {
-            sender: Some(event_sender),
-            title: title.clone(),
-            redraw_notifier: redraw_notifier.clone(),
-        };
+        let mut term = GhosttyTerminal::new(TerminalOptions {
+            cols: config.cols,
+            rows: config.rows,
+            max_scrollback: MAX_SCROLLBACK,
+        })
+        .expect("failed to create ghostty terminal");
 
-        let term = Term::new(
-            alacritty_terminal::term::Config::default(),
-            &dimensions,
-            listener,
-        );
+        term.set_default_fg_color(Some(RgbColor { r: 0xc6, g: 0xd0, b: 0xf5 }))
+            .expect("set default fg");
+        term.set_default_bg_color(Some(RgbColor { r: 0x1e, g: 0x1e, b: 0x2e }))
+            .expect("set default bg");
+        term.set_default_color_palette(Some(catppuccin_palette()))
+            .expect("set palette");
+
+        // Route query responses (DSR/DA/cursor reports) back to the PTY.
+        {
+            let writer = pty_writer.clone();
+            term.on_pty_write(move |_t: &GhosttyTerminal, data: &[u8]| {
+                if let Ok(mut w) = writer.lock() {
+                    if let Some(w) = w.as_mut() {
+                        let _ = w.write_all(data);
+                        let _ = w.flush();
+                    }
+                }
+            })
+            .expect("register pty write handler");
+        }
+
+        // Mirror OSC title changes into a shared slot and wake the UI.
+        {
+            let title = title.clone();
+            let notifier = redraw_notifier.clone();
+            term.on_title_changed(move |t: &GhosttyTerminal| {
+                let new = t
+                    .title()
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_owned());
+                if let Ok(mut cur) = title.lock() {
+                    if cur.as_deref() != new.as_deref() {
+                        *cur = new;
+                    }
+                }
+                if let Some(proxy) = &*notifier.lock().unwrap() {
+                    let _ = proxy.message(());
+                }
+            })
+            .expect("register title handler");
+        }
+
+        let render = RenderState::new().expect("failed to create render state");
+        let rows = RowIterator::new().expect("failed to create row iterator");
+        let cells = CellIterator::new().expect("failed to create cell iterator");
 
         Self {
-            term: Arc::new(Mutex::new(term)),
+            engine: RefCell::new(Engine { term, render, rows, cells }),
             pty_master: None,
             child: None,
-            pty_reader: None,
-            pty_writer: None,
+            pty_writer,
+            pty_rx: Arc::new(Mutex::new(rx)),
             config: config.clone(),
-            event_receiver,
             needs_redraw,
             redraw_notifier,
             title,
+            sel_anchor: None,
         }
+    }
+
+    /// Borrow the engine mutably (UI-thread only).
+    pub(crate) fn engine(&self) -> std::cell::RefMut<'_, Engine> {
+        self.engine.borrow_mut()
     }
 
     /// Start a PTY shell process (e.g., zsh, bash, powershell)
@@ -156,61 +186,49 @@ impl Terminal {
         self.pty_master = Some(pair.master);
 
         // Split reader/writer for async I/O
-        if let Some(master) = &mut self.pty_master {
-            let reader = master.try_clone_reader()?;
+        let reader;
+        {
+            let master = self.pty_master.as_mut().expect("pty master");
+            reader = master.try_clone_reader()?;
             let writer = master.take_writer()?;
-            self.pty_reader = Some(reader);
-            self.pty_writer = Some(writer);
+            *self.pty_writer.lock().unwrap() = Some(writer);
         }
 
-        // Start background thread to read PTY output and feed to terminal
-        let term_clone = self.term.clone();
+        // Background thread: read PTY output, sniff OSC notifications, and push
+        // raw chunks to the UI thread which feeds them to the terminal.
         let needs_redraw = self.needs_redraw.clone();
-        let reader = self.pty_reader.take();
         let redraw_notifier = self.redraw_notifier.clone();
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        self.pty_rx = Arc::new(Mutex::new(rx));
 
         thread::spawn(move || {
-            // println!("DEBUG: PTY reader thread started!");
-            if let Some(mut reader) = reader {
-                let mut buf = [0u8; 4096];
-                // Create VTE parser - this parses ANSI escape sequences and calls
-                // the appropriate methods on the terminal (input, execute, etc.)
-                let mut parser: Processor<alacritty_terminal::vte::ansi::StdSyncHandler> = Processor::new();
-                let mut osc_parser = OscNotificationParser::new();
+            let mut reader = reader;
+            let mut buf = [0u8; 4096];
+            let mut osc_parser = OscNotificationParser::new();
 
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) => {
-                            // println!("DEBUG: PTY reader thread read 0 bytes (EOF). Exiting loop.");
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Err(_) => break,
+                    Ok(bytes_read) => {
+                        for byte in &buf[..bytes_read] {
+                            osc_parser.advance(*byte);
+                        }
+
+                        if tx.send(buf[..bytes_read].to_vec()).is_err() {
                             break;
                         }
-                        Err(_e) => {
-                            break;
-                        }
-                        Ok(bytes_read) => {
-                            // Process bytes through OSC parser for notifications
-                            for byte in &buf[..bytes_read] {
-                                osc_parser.advance(*byte);
-                            }
 
-                            // Parse PTY bytes through VTE parser
-                            // This correctly handles ANSI escape sequences
-                            if let Ok(mut term) = term_clone.lock() {
-                                for byte in &buf[..bytes_read] {
-                                    parser.advance(&mut *term, *byte);
-                                }
-                            }
-                            // Coalesce redraw trigger: only send message if needs_redraw was false
-                            let already_pending = {
-                                let mut needs = needs_redraw.lock().unwrap();
-                                let prev = *needs;
-                                *needs = true;
-                                prev
-                            };
-                            if !already_pending {
-                                if let Some(proxy) = &*redraw_notifier.lock().unwrap() {
-                                    let _ = proxy.message(());
-                                }
+                        // Coalesce redraw trigger: only send message if none pending
+                        let already_pending = {
+                            let mut needs = needs_redraw.lock().unwrap();
+                            let prev = *needs;
+                            *needs = true;
+                            prev
+                        };
+                        if !already_pending {
+                            if let Some(proxy) = &*redraw_notifier.lock().unwrap() {
+                                let _ = proxy.message(());
                             }
                         }
                     }
@@ -223,17 +241,34 @@ impl Terminal {
 
     /// Write input to the PTY (user keystrokes)
     pub fn write_input(&mut self, data: &[u8]) -> std::io::Result<()> {
-        if let Some(writer) = &mut self.pty_writer {
+        // Typing always returns the view to the live prompt.
+        self.scroll_to_bottom();
+        if let Some(writer) = &mut *self.pty_writer.lock().unwrap() {
             writer.write_all(data)?;
             writer.flush()?;
         }
         Ok(())
     }
 
-    /// Check if terminal needs redraw and consume the flag
+    /// Drain pending PTY data into the terminal and report whether a redraw is needed
     pub fn check_and_clear_redraw(&self) -> bool {
+        let mut fed = false;
+        loop {
+            let chunk = {
+                let rx = self.pty_rx.lock().unwrap();
+                rx.try_recv()
+            };
+            match chunk {
+                Ok(data) => {
+                    self.engine.borrow_mut().term.vt_write(&data);
+                    fed = true;
+                }
+                Err(_) => break,
+            }
+        }
+
         let mut needs = self.needs_redraw.lock().unwrap();
-        let val = *needs;
+        let val = *needs || fed;
         *needs = false;
         val
     }
@@ -243,122 +278,140 @@ impl Terminal {
         self.title.lock().unwrap().clone()
     }
 
-    /// Get a copy of the terminal grid for rendering
-    pub fn grid(&self) -> Grid<Cell> {
-        let term = self.term.lock().unwrap();
-        term.grid().clone()
-    }
-
     /// Get the number of columns in the grid
     pub fn grid_cols(&self) -> usize {
-        let term = self.term.lock().unwrap();
-        term.grid().columns()
+        self.engine.borrow().term.cols().unwrap_or(0) as usize
     }
 
     /// Get the number of rows in the grid
     pub fn grid_rows(&self) -> usize {
-        let term = self.term.lock().unwrap();
-        term.grid().screen_lines()
+        self.engine.borrow().term.rows().unwrap_or(0) as usize
     }
 
-    /// Get the config
-    pub fn config(&self) -> &TerminalConfig {
-        &self.config
-    }
-
-    /// Resize the terminal
-    pub fn resize(&mut self, cols: u16, rows: u16) {
+    /// Resize the terminal including cell pixel dimensions
+    pub fn resize_px(&mut self, cols: u16, rows: u16, cell_w: u16, cell_h: u16) {
         self.config.cols = cols;
         self.config.rows = rows;
+        self.config.cell_width = cell_w;
+        self.config.cell_height = cell_h;
 
-        let dimensions = TermDimensions {
-            columns: cols,
-            lines: rows,
-        };
-        let mut term = self.term.lock().unwrap();
-        term.resize(dimensions);
-        drop(term);
+        {
+            let mut engine = self.engine.borrow_mut();
+            let _ = engine.term.resize(cols, rows, cell_w as u32, cell_h as u32);
+        }
 
         if let Some(master) = &mut self.pty_master {
             let size = portable_pty::PtySize {
                 rows,
                 cols,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width: cell_w * cols,
+                pixel_height: cell_h * rows,
             };
             let _ = master.resize(size);
         }
     }
 
-    /// Get the display offset (for scrolling)
-    pub fn display_offset(&self) -> usize {
-        let term = self.term.lock().unwrap();
-        term.grid().display_offset()
-    }
-
     /// Scroll the viewport by delta_lines (positive = scroll up into history, negative = scroll down)
     pub fn scroll_viewport(&mut self, delta_lines: i32) {
-        let mut term = self.term.lock().unwrap();
-        term.grid_mut().scroll_display(Scroll::Delta(delta_lines));
+        let mut engine = self.engine.borrow_mut();
+        engine
+            .term
+            .scroll_viewport(ScrollViewport::Delta(-(delta_lines as isize)));
     }
 
-    /// Get cursor position
-    pub fn cursor(&self) -> Point {
-        let term = self.term.lock().unwrap();
-        let grid = term.grid();
-        grid.cursor.point
+    /// Jump to the active area (bottom of scrollback)
+    pub fn scroll_to_bottom(&mut self) {
+        let mut engine = self.engine.borrow_mut();
+        engine.term.scroll_viewport(ScrollViewport::Bottom);
     }
 
-    /// Check if cell at (line, col) is in selection
-    pub fn is_cell_selected(&self, line: i32, col: usize) -> bool {
-        let term = self.term.lock().unwrap();
-        if let Some(selection) = &term.selection {
-            use alacritty_terminal::index::{Point, Column, Line};
-            if let Some(range) = selection.to_range(&*term) {
-                range.contains(Point::new(Line(line), Column(col)))
-            } else {
-                false
+    /// Get cursor position (x, y) in active-area coordinates
+    pub fn cursor(&self) -> (u16, u16) {
+        let engine = self.engine.borrow();
+        let x = engine.term.cursor_x().unwrap_or(0);
+        let y = engine.term.cursor_y().unwrap_or(0);
+        (x, y)
+    }
+
+    fn viewport_point(&self, line: i32, col: usize) -> Point {
+        Point::Viewport(PointCoordinate {
+            x: col as u16,
+            y: line.max(0) as u32,
+        })
+    }
+
+    /// Start a new character-based selection at the given viewport position
+    pub fn start_selection(&mut self, line: i32, col: usize) {
+        let anchor = self.viewport_point(line, col);
+        self.sel_anchor = Some(anchor);
+        let engine = self.engine.borrow();
+        if let (Ok(a), Ok(b)) = (engine.term.grid_ref(anchor), engine.term.grid_ref(anchor)) {
+            let sel = Selection::new(a, b, false);
+            let _ = engine.term.set_selection(Some(&sel));
+        }
+    }
+
+    /// Start a word selection (double-click) at the given viewport position
+    pub fn start_word_selection(&mut self, line: i32, col: usize) {
+        let anchor = self.viewport_point(line, col);
+        self.sel_anchor = Some(anchor);
+        let engine = self.engine.borrow();
+        if let Ok(grid_ref) = engine.term.grid_ref(anchor) {
+            let sel = engine
+                .term
+                .select_word(SelectWordOptions::new(grid_ref))
+                .ok()
+                .flatten();
+            if let Some(sel) = sel {
+                let _ = engine.term.set_selection(Some(&sel));
             }
-        } else {
-            false
+        }
+    }
+
+    /// Start a line selection (triple-click) at the given viewport position
+    pub fn start_line_selection(&mut self, line: i32, col: usize) {
+        let anchor = self.viewport_point(line, col);
+        self.sel_anchor = Some(anchor);
+        let engine = self.engine.borrow();
+        if let Ok(grid_ref) = engine.term.grid_ref(anchor) {
+            let sel = engine
+                .term
+                .select_line(SelectLineOptions::new(grid_ref))
+                .ok()
+                .flatten();
+            if let Some(sel) = sel {
+                let _ = engine.term.set_selection(Some(&sel));
+            }
+        }
+    }
+
+    /// Extend the current selection to the given viewport position
+    pub fn update_selection(&mut self, line: i32, col: usize) {
+        let Some(anchor) = self.sel_anchor else { return };
+        let focus = self.viewport_point(line, col);
+        let engine = self.engine.borrow();
+        if let (Ok(a), Ok(b)) = (engine.term.grid_ref(anchor), engine.term.grid_ref(focus)) {
+            let sel = Selection::new(a, b, false);
+            let _ = engine.term.set_selection(Some(&sel));
         }
     }
 
     /// Clear selection
     pub fn clear_selection(&mut self) {
-        let mut term = self.term.lock().unwrap();
-        term.selection = None;
-    }
-
-    /// Start a new selection with the given type using viewport-relative coordinates
-    pub fn start_selection_with_type(&mut self, line: i32, col: usize, ty: alacritty_terminal::selection::SelectionType) {
-        use alacritty_terminal::index::{Point, Column, Line, Side};
-        use alacritty_terminal::selection::Selection;
-        let mut term = self.term.lock().unwrap();
-        let point = Point::new(Line(line), Column(col));
-        term.selection = Some(Selection::new(ty, point, Side::Left));
-    }
-
-    /// Start a new simple (character-based) selection
-    pub fn start_selection(&mut self, line: i32, col: usize) {
-        use alacritty_terminal::selection::SelectionType;
-        self.start_selection_with_type(line, col, SelectionType::Simple);
-    }
-
-    /// Update selection end point
-    pub fn update_selection(&mut self, line: i32, col: usize) {
-        use alacritty_terminal::index::{Point, Column, Line, Side};
-        let mut term = self.term.lock().unwrap();
-        if let Some(selection) = &mut term.selection {
-            let point = Point::new(Line(line), Column(col));
-            selection.update(point, Side::Right);
-        }
+        self.sel_anchor = None;
+        let engine = self.engine.borrow();
+        let _ = engine.term.set_selection(None);
     }
 
     /// Convert selection to string
     pub fn selection_to_string(&self) -> Option<String> {
-        let term = self.term.lock().unwrap();
-        term.selection_to_string()
+        let engine = self.engine.borrow();
+        let bytes = engine
+            .term
+            .format_selection_alloc(None, FormatOptions::new())
+            .ok()
+            .flatten()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 }
 
@@ -486,4 +539,3 @@ impl OscNotificationParser {
         }
     }
 }
-

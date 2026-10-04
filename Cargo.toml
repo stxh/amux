@@ -5,8 +5,9 @@ edition = "2021"
 description = "A cross-platform terminal multiplexer combining Alacritty terminal backend with Xilem/Vello GPU-accelerated rendering"
 
 [dependencies]
-# Core terminal parsing - ANSI parsing, PTY state management, scroll buffer
-alacritty_terminal = "0.24.0"
+# Ghostty terminal engine (safe bindings to C libghostty-vt); pinned because the
+# crate tracks a Ghostty commit whose build requires the local Zig (0.15.2).
+libghostty-vt = "=0.2.2"
 # UI framework - declarative UI, layout, cross-platform window via winit, GPU rendering
 xilem = { git = "https://github.com/linebender/xilem" }
 # PTY handling - cross-platform pseudo-terminal management
