@@ -231,8 +231,8 @@ pub fn handle_key_input(app: &mut App, key: &str, ctrl: bool, alt: bool, shift: 
     if ctrl && !shift && !alt && key == "k" {
         if let Some(group) = app.groups.get_mut(app.active_group_index) {
             if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
-                if let Some((_, pane_state)) = tab.pane_tree.find_mut(tab.active_pane_id) {
-                    pane_state.scroll_offset = 0;
+                if let Some((pane, _)) = tab.pane_tree.find_mut(tab.active_pane_id) {
+                    pane.terminal.scroll_to_bottom();
                     app.redraw_counter += 1;
                     app.status_message = "Cleared scrollback".to_string();
                 }

@@ -20,7 +20,7 @@ impl Pane {
         self.is_active = active;
     }
 
-    pub fn resize(&mut self, cols: u16, rows: u16) {
-        self.terminal.resize(cols, rows);
+    pub fn resize_px(&mut self, cols: u16, rows: u16, cell_w: u16, cell_h: u16) {
+        self.terminal.resize_px(cols, rows, cell_w, cell_h);
     }
 }

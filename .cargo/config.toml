@@ -1,0 +1,5 @@
+[env]
+# Vendored Ghostty checkout used by libghostty-vt-sys build.rs (direct GitHub
+# access is unreliable in this environment). Delete this section to fall back
+# to the crate's normal git-clone fetch.
+GHOSTTY_SOURCE_DIR = { value = "vendor/ghostty-a887df42c56f6de86c0fe6da9c4eeca37931e083", relative = true }

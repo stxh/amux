@@ -305,10 +305,9 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
         },
         |state: &mut App, ()| {
             // println!("DEBUG: task_raw event callback received message!");
-            let before = state.redraw_counter;
             if state.check_and_clear_redraw() {
                 state.redraw_counter += 1;
-                // println!("DEBUG: task_raw check_and_clear_redraw was TRUE! redraw_counter updated from {} to {}", before, state.redraw_counter);
+                // println!("DEBUG: task_raw check_and_clear_redraw was TRUE! redraw_counter updated");
             }
             state.apply_pending_resizes();
         },

@@ -152,12 +152,14 @@ impl App {
 
     /// Apply all pending terminal resizes
     pub fn apply_pending_resizes(&mut self) {
+        let cell_w = self.cell_w.max(1.0).ceil() as u16;
+        let cell_h = self.cell_h.max(1.0).ceil() as u16;
         let resizes = std::mem::take(&mut self.pending_resizes);
         for (pane_id, cols, rows) in resizes {
             for group in &mut self.groups {
                 for tab in &mut group.tabs {
                     if let Some((pane, _)) = tab.pane_tree.find_mut(pane_id) {
-                        pane.resize(cols, rows);
+                        pane.resize_px(cols, rows, cell_w, cell_h);
                     }
                 }
             }
@@ -420,8 +422,8 @@ impl App {
     /// Get current cursor position of active pane
     pub fn cursor_pos(&self) -> (usize, usize) {
         if let Some(pane) = self.active_pane() {
-            let p = pane.terminal.cursor();
-            (p.column.0, p.line.0.max(0) as usize)
+            let (x, y) = pane.terminal.cursor();
+            (x as usize, y as usize)
         } else {
             (0, 0)
         }
@@ -444,15 +446,10 @@ impl App {
 
     /// Scroll the active terminal pane by delta_lines (positive = scroll up into history, negative = scroll down)
     pub fn scroll_terminal(&mut self, delta_lines: i32) {
-        if let Some(group) = self.groups.get_mut(self.active_group_index) {
-            if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
-                if let Some((_pane, pane_state)) = tab.pane_tree.find_mut(tab.active_pane_id) {
-                    let new_offset = pane_state.scroll_offset as i32 + delta_lines;
-                    pane_state.scroll_offset = new_offset.max(0) as usize;
-                    // Force a redraw
-                    self.redraw_counter += 1;
-                }
-            }
+        if let Some(pane) = self.active_pane_mut() {
+            pane.terminal.scroll_viewport(delta_lines);
+            // Force a redraw
+            self.redraw_counter += 1;
         }
     }
 
@@ -551,34 +548,30 @@ impl App {
         if let Some((pane_id, rect)) = clicked {
             self.focus_pane_by_id(pane_id);
 
-            // Determine selection type from click count (do this before mutable group borrow)
-            use alacritty_terminal::selection::SelectionType;
-            let sel_type = if button == xilem::masonry::core::PointerButton::Primary {
-                let click_count = self.update_click_state(pane_id);
-                match click_count {
-                    2 => SelectionType::Semantic,
-                    3 => SelectionType::Lines,
-                    _ => SelectionType::Simple,
-                }
+            // Determine click count for word/line selection (Primary button only)
+            let click_count = if button == xilem::masonry::core::PointerButton::Primary {
+                self.update_click_state(pane_id)
             } else {
-                SelectionType::Simple
+                1
             };
 
             if let Some(group) = self.groups.get_mut(self.active_group_index) {
                 if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
-                    if let Some((pane, pane_state)) = tab.pane_tree.find_mut(pane_id) {
+                    if let Some((pane, _)) = tab.pane_tree.find_mut(pane_id) {
                         let cols = pane.terminal.grid_cols();
                         let rows = pane.terminal.grid_rows();
-                        let display_offset = pane_state.scroll_offset + pane.terminal.display_offset();
 
                         let col = (((px - rect.x - 12.0) / self.cell_w).floor().max(0.0) as usize)
                             .min(cols.saturating_sub(1));
-                        let row = (((py - rect.y - 12.0) / self.cell_h).floor().max(0.0) as i32)
-                            .min((rows as i32).saturating_sub(1));
-                        let line_num = row - display_offset as i32;
+                        let row = (((py - rect.y - 12.0) / self.cell_h).floor().max(0.0) as usize)
+                            .min(rows.saturating_sub(1));
 
                         if button == xilem::masonry::core::PointerButton::Primary {
-                            pane.terminal.start_selection_with_type(line_num, col, sel_type);
+                            match click_count {
+                                2 => pane.terminal.start_word_selection(row as i32, col),
+                                3 => pane.terminal.start_line_selection(row as i32, col),
+                                _ => pane.terminal.start_selection(row as i32, col),
+                            }
                             self.redraw_counter += 1;
                         } else if button == xilem::masonry::core::PointerButton::Secondary {
                             // Right click -> Paste clipboard content
@@ -616,18 +609,16 @@ impl App {
 
             if let Some(group) = self.groups.get_mut(self.active_group_index) {
                 if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
-                    if let Some((pane, pane_state)) = tab.pane_tree.find_mut(active_id) {
+                    if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
                         let cols = pane.terminal.grid_cols();
                         let rows = pane.terminal.grid_rows();
-                        let display_offset = pane_state.scroll_offset + pane.terminal.display_offset();
 
                         let col = (((px - active_rect.x - 12.0) / self.cell_w).floor().max(0.0) as usize)
                             .min(cols.saturating_sub(1));
-                        let row = (((py - active_rect.y - 12.0) / self.cell_h).floor().max(0.0) as i32)
-                            .min((rows as i32).saturating_sub(1));
-                        let line_num = row - display_offset as i32;
+                        let row = (((py - active_rect.y - 12.0) / self.cell_h).floor().max(0.0) as usize)
+                            .min(rows.saturating_sub(1));
 
-                        pane.terminal.update_selection(line_num, col);
+                        pane.terminal.update_selection(row as i32, col);
                         self.redraw_counter += 1;
                     }
                 }

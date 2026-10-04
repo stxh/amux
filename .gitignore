@@ -25,3 +25,6 @@ rustc-ice-*.txt
 .qwen
 .claude
 *.log
+
+# Vendored Ghostty source for libghostty-vt build (large; local only)
+vendor/ghostty-*
