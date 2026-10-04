@@ -1,5 +1,6 @@
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::grid::Grid;
+use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::Cell;
@@ -295,6 +296,12 @@ impl Terminal {
         term.grid().display_offset()
     }
 
+    /// Scroll the viewport by delta_lines (positive = scroll up into history, negative = scroll down)
+    pub fn scroll_viewport(&mut self, delta_lines: i32) {
+        let mut term = self.term.lock().unwrap();
+        term.grid_mut().scroll_display(Scroll::Delta(delta_lines));
+    }
+
     /// Get cursor position
     pub fn cursor(&self) -> Point {
         let term = self.term.lock().unwrap();
@@ -318,13 +325,13 @@ impl Terminal {
     }
 
     /// Clear selection
-    pub fn clear_selection(&self) {
+    pub fn clear_selection(&mut self) {
         let mut term = self.term.lock().unwrap();
         term.selection = None;
     }
 
-    /// Start a new selection with the given type
-    pub fn start_selection_with_type(&self, line: i32, col: usize, ty: alacritty_terminal::selection::SelectionType) {
+    /// Start a new selection with the given type using viewport-relative coordinates
+    pub fn start_selection_with_type(&mut self, line: i32, col: usize, ty: alacritty_terminal::selection::SelectionType) {
         use alacritty_terminal::index::{Point, Column, Line, Side};
         use alacritty_terminal::selection::Selection;
         let mut term = self.term.lock().unwrap();
@@ -333,13 +340,13 @@ impl Terminal {
     }
 
     /// Start a new simple (character-based) selection
-    pub fn start_selection(&self, line: i32, col: usize) {
+    pub fn start_selection(&mut self, line: i32, col: usize) {
         use alacritty_terminal::selection::SelectionType;
         self.start_selection_with_type(line, col, SelectionType::Simple);
     }
 
     /// Update selection end point
-    pub fn update_selection(&self, line: i32, col: usize) {
+    pub fn update_selection(&mut self, line: i32, col: usize) {
         use alacritty_terminal::index::{Point, Column, Line, Side};
         let mut term = self.term.lock().unwrap();
         if let Some(selection) = &mut term.selection {

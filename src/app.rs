@@ -372,7 +372,7 @@ impl App {
 
     /// Handle key events, including prefix mode
     pub fn handle_key(&mut self, key: &str) {
-        if let Some(pane) = self.active_pane() {
+        if let Some(pane) = self.active_pane_mut() {
             pane.terminal.clear_selection();
             self.redraw_counter += 1;
         }
@@ -407,7 +407,7 @@ impl App {
 
     /// Handle a raw keyboard event with modifier information
     pub fn handle_raw_key_event(&mut self, key: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
-        if let Some(pane) = self.active_pane() {
+        if let Some(pane) = self.active_pane_mut() {
             pane.terminal.clear_selection();
             self.redraw_counter += 1;
         }
