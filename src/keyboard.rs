@@ -248,6 +248,15 @@ pub fn handle_key_input(app: &mut App, key: &str, ctrl: bool, alt: bool, shift: 
         }
         return true;
     }
+    if shift && !ctrl && !alt && (key == "pageup" || key == "pagedown") {
+        let rows = app
+            .active_pane()
+            .map(|p| p.terminal.grid_rows() as i32)
+            .unwrap_or(20);
+        let delta = if key == "pageup" { rows } else { -rows };
+        app.scroll_terminal(delta);
+        return true;
+    }
     if ctrl && !shift && !alt && (key == "+" || key == "=") {
         app.font_size = (app.font_size + 1.0).min(72.0);
         app.status_message = format!("Font size: {}", app.font_size);
