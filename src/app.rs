@@ -64,6 +64,8 @@ pub struct App {
     last_click_pane_id: usize,
     /// Current click count (1=click, 2=double-click, 3=triple-click)
     click_count: usize,
+    /// Button held during a mouse-reporting drag (adapter btn_id), for motion reports
+    mouse_down_btn: Option<u8>,
 }
 
 impl AppState for App {
@@ -108,6 +110,7 @@ impl App {
             last_click_time: std::time::Instant::now(),
             last_click_pane_id: 0,
             click_count: 0,
+            mouse_down_btn: None,
         }
     }
 
@@ -521,7 +524,7 @@ impl App {
     }
 
     /// Handle mouse button press down at coordinates (px, py)
-    pub fn handle_mouse_down(&mut self, px: f64, py: f64, button: xilem::masonry::core::PointerButton) {
+    pub fn handle_mouse_down(&mut self, px: f64, py: f64, button: xilem::masonry::core::PointerButton, shift: bool, alt: bool, ctrl: bool) {
         // 1. Check if clicked a pane's top-right floating close button (if split panes are present)
         let mut clicked_close_pane_id = None;
         if let Some(group) = self.groups.get(self.active_group_index) {
@@ -551,6 +554,13 @@ impl App {
         let clicked = self.find_pane_at(px, py);
         if let Some((pane_id, rect)) = clicked {
             self.focus_pane_by_id(pane_id);
+            let btn_id = pointer_btn_id(button);
+
+            // If the hosted app captures the mouse (and Shift isn't held to bypass),
+            // report the press to the PTY and skip local selection.
+            if self.try_report_press(pane_id, rect, px, py, btn_id, shift, alt, ctrl) {
+                return;
+            }
 
             // Determine click count for word/line selection (Primary button only)
             let click_count = if button == xilem::masonry::core::PointerButton::Primary {
@@ -593,45 +603,92 @@ impl App {
         }
     }
 
+    /// If `pane_id`'s app captures the mouse, report a press and return true.
+    fn try_report_press(
+        &mut self,
+        pane_id: PaneId,
+        rect: crate::pane_tree::Rect,
+        px: f64,
+        py: f64,
+        btn_id: u8,
+        shift: bool,
+        alt: bool,
+        ctrl: bool,
+    ) -> bool {
+        if shift {
+            return false;
+        }
+        if let Some(group) = self.groups.get_mut(self.active_group_index) {
+            if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
+                if let Some((pane, _)) = tab.pane_tree.find_mut(pane_id) {
+                    if pane.terminal.mouse_is_reporting() {
+                        let gx = (px - rect.x - 12.0).max(0.0) as f32;
+                        let gy = (py - rect.y - 12.0).max(0.0) as f32;
+                        pane.terminal.mouse_report(btn_id, 0, true, gx, gy, shift, alt, ctrl);
+                        self.mouse_down_btn = Some(btn_id);
+                        self.redraw_counter += 1;
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Handle mouse move/dragging at coordinates (px, py)
-    pub fn handle_mouse_move(&mut self, px: f64, py: f64, is_dragging: bool) {
+    pub fn handle_mouse_move(&mut self, px: f64, py: f64, is_dragging: bool, shift: bool, alt: bool, ctrl: bool) {
         self.hover_pos = Some((px, py));
         self.redraw_counter += 1;
 
-        if is_dragging {
-            let active_id = if let Some(pane) = self.active_pane() {
-                pane.id
-            } else {
-                return;
-            };
+        if !is_dragging {
+            return;
+        }
 
-            let active_rect = if let Some((_, r)) = self.last_pane_layouts.iter().find(|(id, _)| *id == active_id) {
-                *r
-            } else {
-                return;
-            };
+        // When the app captures the mouse, report drag motion instead of selecting.
+        if self.try_report_motion(px, py, shift, alt, ctrl) {
+            return;
+        }
 
-            if let Some(group) = self.groups.get_mut(self.active_group_index) {
-                if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
-                    if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
-                        let cols = pane.terminal.grid_cols();
-                        let rows = pane.terminal.grid_rows();
+        let active_id = if let Some(pane) = self.active_pane() {
+            pane.id
+        } else {
+            return;
+        };
 
-                        let col = (((px - active_rect.x - 12.0) / self.cell_w).floor().max(0.0) as usize)
-                            .min(cols.saturating_sub(1));
-                        let row = (((py - active_rect.y - 12.0) / self.cell_h).floor().max(0.0) as usize)
-                            .min(rows.saturating_sub(1));
+        let active_rect = if let Some((_, r)) = self.last_pane_layouts.iter().find(|(id, _)| *id == active_id) {
+            *r
+        } else {
+            return;
+        };
 
-                        pane.terminal.update_selection(row as i32, col);
-                        self.redraw_counter += 1;
-                    }
+        if let Some(group) = self.groups.get_mut(self.active_group_index) {
+            if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
+                if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
+                    let cols = pane.terminal.grid_cols();
+                    let rows = pane.terminal.grid_rows();
+
+                    let col = (((px - active_rect.x - 12.0) / self.cell_w).floor().max(0.0) as usize)
+                        .min(cols.saturating_sub(1));
+                    let row = (((py - active_rect.y - 12.0) / self.cell_h).floor().max(0.0) as usize)
+                        .min(rows.saturating_sub(1));
+
+                    pane.terminal.update_selection(row as i32, col);
+                    self.redraw_counter += 1;
                 }
             }
         }
     }
 
     /// Handle mouse button release up at coordinates (px, py)
-    pub fn handle_mouse_up(&mut self, _px: f64, _py: f64, button: xilem::masonry::core::PointerButton) {
+    pub fn handle_mouse_up(&mut self, px: f64, py: f64, button: xilem::masonry::core::PointerButton, shift: bool, alt: bool, ctrl: bool) {
+        let btn_id = pointer_btn_id(button);
+        self.mouse_down_btn = None;
+
+        // When the app captures the mouse, report the release and skip copy-on-select.
+        if self.try_report_release(px, py, btn_id, shift, alt, ctrl) {
+            return;
+        }
+
         if button == xilem::masonry::core::PointerButton::Primary {
             let active_id = if let Some(pane) = self.active_pane() {
                 pane.id
@@ -653,6 +710,114 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Scroll wheel: report to the app if it captures the mouse, else scrollback.
+    pub fn handle_scroll(&mut self, delta_lines: i32, px: f64, py: f64, shift: bool, alt: bool, ctrl: bool) {
+        if !shift {
+            if let Some(active_id) = self.active_pane().map(|p| p.id) {
+                let rect = self
+                    .last_pane_layouts
+                    .iter()
+                    .find(|(id, _)| *id == active_id)
+                    .map(|(_, r)| *r);
+                if let Some(rect) = rect {
+                    if let Some(group) = self.groups.get_mut(self.active_group_index) {
+                        if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
+                            if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
+                                if pane.terminal.mouse_is_reporting() {
+                                    let gx = (px - rect.x - 12.0).max(0.0) as f32;
+                                    let gy = (py - rect.y - 12.0).max(0.0) as f32;
+                                    let btn = if delta_lines > 0 { 3 } else { 4 };
+                                    pane.terminal.mouse_report(btn, 0, false, gx, gy, shift, alt, ctrl);
+                                    self.redraw_counter += 1;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.scroll_terminal(delta_lines);
+    }
+
+    /// Report a drag motion event if the active pane's app captures the mouse.
+    fn try_report_motion(&mut self, px: f64, py: f64, shift: bool, alt: bool, ctrl: bool) -> bool {
+        if shift {
+            return false;
+        }
+        let btn = match self.mouse_down_btn {
+            Some(b) => b,
+            None => return false,
+        };
+        let active_id = match self.active_pane() {
+            Some(p) => p.id,
+            None => return false,
+        };
+        let rect = match self
+            .last_pane_layouts
+            .iter()
+            .find(|(id, _)| *id == active_id)
+        {
+            Some((_, r)) => *r,
+            None => return false,
+        };
+        if let Some(group) = self.groups.get_mut(self.active_group_index) {
+            if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
+                if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
+                    if pane.terminal.mouse_is_reporting() {
+                        let gx = (px - rect.x - 12.0).max(0.0) as f32;
+                        let gy = (py - rect.y - 12.0).max(0.0) as f32;
+                        pane.terminal.mouse_report(btn, 2, true, gx, gy, shift, alt, ctrl);
+                        self.redraw_counter += 1;
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Report a button-release event if the active pane's app captures the mouse.
+    fn try_report_release(
+        &mut self,
+        px: f64,
+        py: f64,
+        btn_id: u8,
+        shift: bool,
+        alt: bool,
+        ctrl: bool,
+    ) -> bool {
+        if shift {
+            return false;
+        }
+        let active_id = match self.active_pane() {
+            Some(p) => p.id,
+            None => return false,
+        };
+        let rect = match self
+            .last_pane_layouts
+            .iter()
+            .find(|(id, _)| *id == active_id)
+        {
+            Some((_, r)) => *r,
+            None => return false,
+        };
+        if let Some(group) = self.groups.get_mut(self.active_group_index) {
+            if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
+                if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
+                    if pane.terminal.mouse_is_reporting() {
+                        let gx = (px - rect.x - 12.0).max(0.0) as f32;
+                        let gy = (py - rect.y - 12.0).max(0.0) as f32;
+                        pane.terminal.mouse_report(btn_id, 1, false, gx, gy, shift, alt, ctrl);
+                        self.redraw_counter += 1;
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Save current state to config file (font_size, window size/position)
@@ -743,6 +908,17 @@ impl App {
                 }
             }
         }
+    }
+}
+
+/// Map a masonry pointer button to the adapter's btn_id (0=left,1=right,2=middle,255=other).
+fn pointer_btn_id(button: xilem::masonry::core::PointerButton) -> u8 {
+    use xilem::masonry::core::PointerButton::*;
+    match button {
+        Primary => 0,
+        Secondary => 1,
+        Auxiliary => 2,
+        _ => 255,
     }
 }
 

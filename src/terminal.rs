@@ -1,3 +1,8 @@
+use libghostty_vt::key::Mods;
+use libghostty_vt::mouse::{
+    Action as MouseAction, Button as MouseButton, Encoder as MouseEncoder, EncoderSize,
+    Event as MouseEvent, Position as MousePosition,
+};
 use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
 use libghostty_vt::style::{Palette, RgbColor};
@@ -286,6 +291,97 @@ impl Terminal {
     /// Get the number of rows in the grid
     pub fn grid_rows(&self) -> usize {
         self.engine.borrow().term.rows().unwrap_or(0) as usize
+    }
+
+    /// True when the hosted app has enabled mouse tracking (DEC 1000/1002/1003...).
+    /// When true, mouse events should be reported to the PTY instead of used for
+    /// local selection.
+    pub fn mouse_is_reporting(&self) -> bool {
+        self.engine.borrow().term.is_mouse_tracking().unwrap_or(false)
+    }
+
+    /// Encode a mouse event into the terminal's active report protocol and write it
+    /// to the PTY. Returns true if any bytes were sent.
+    ///
+    /// - `btn_id`: 0=left, 1=right, 2=middle, 3=wheel-up, 4=wheel-down, 255=none.
+    /// - `action`: 0=press, 1=release, 2=motion.
+    /// - `x`/`y`: grid-relative logical pixel coords (origin at cell 0,0 top-left).
+    pub fn mouse_report(
+        &mut self,
+        btn_id: u8,
+        action: u8,
+        any_button: bool,
+        x: f32,
+        y: f32,
+        shift: bool,
+        alt: bool,
+        ctrl: bool,
+    ) -> bool {
+        let cell_w = self.config.cell_width.max(1) as u32;
+        let cell_h = self.config.cell_height.max(1) as u32;
+        let cols = self.grid_cols() as u32;
+        let rows = self.grid_rows() as u32;
+
+        let mut encoder = match MouseEncoder::new() {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        {
+            let engine = self.engine.borrow();
+            encoder.set_options_from_terminal(&engine.term);
+        }
+        encoder.set_any_button_pressed(any_button);
+        encoder.set_size(EncoderSize {
+            screen_width: cols.saturating_mul(cell_w),
+            screen_height: rows.saturating_mul(cell_h),
+            cell_width: cell_w,
+            cell_height: cell_h,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_left: 0,
+            padding_right: 0,
+        });
+
+        let button = match btn_id {
+            0 => Some(MouseButton::Left),
+            1 => Some(MouseButton::Right),
+            2 => Some(MouseButton::Middle),
+            3 => Some(MouseButton::Four),
+            4 => Some(MouseButton::Five),
+            _ => None,
+        };
+        let act = match action {
+            1 => MouseAction::Release,
+            2 => MouseAction::Motion,
+            _ => MouseAction::Press,
+        };
+        let mut mods = Mods::empty();
+        if shift {
+            mods |= Mods::SHIFT;
+        }
+        if alt {
+            mods |= Mods::ALT;
+        }
+        if ctrl {
+            mods |= Mods::CTRL;
+        }
+
+        let mut event = match MouseEvent::new() {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        event
+            .set_action(act)
+            .set_button(button)
+            .set_mods(mods)
+            .set_position(MousePosition { x, y });
+
+        let mut out = Vec::new();
+        if encoder.encode_to_vec(&event, &mut out).is_err() || out.is_empty() {
+            return false;
+        }
+        let _ = self.write_input(&out);
+        true
     }
 
     /// Resize the terminal including cell pixel dimensions

@@ -325,20 +325,20 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
                     false
                 }
             }
-            crate::terminal_keyboard::TerminalAction::Scroll { delta_lines } => {
-                state.scroll_terminal(delta_lines);
+            crate::terminal_keyboard::TerminalAction::Scroll { delta_lines, x, y, shift, alt, ctrl } => {
+                state.handle_scroll(delta_lines, x, y, shift, alt, ctrl);
                 true
             }
-            crate::terminal_keyboard::TerminalAction::MouseDown { x, y, button } => {
-                state.handle_mouse_down(x, y, button);
+            crate::terminal_keyboard::TerminalAction::MouseDown { x, y, button, shift, alt, ctrl } => {
+                state.handle_mouse_down(x, y, button, shift, alt, ctrl);
                 true
             }
-            crate::terminal_keyboard::TerminalAction::MouseMove { x, y, is_dragging } => {
-                state.handle_mouse_move(x, y, is_dragging);
+            crate::terminal_keyboard::TerminalAction::MouseMove { x, y, is_dragging, shift, alt, ctrl } => {
+                state.handle_mouse_move(x, y, is_dragging, shift, alt, ctrl);
                 true
             }
-            crate::terminal_keyboard::TerminalAction::MouseUp { x, y, button } => {
-                state.handle_mouse_up(x, y, button);
+            crate::terminal_keyboard::TerminalAction::MouseUp { x, y, button, shift, alt, ctrl } => {
+                state.handle_mouse_up(x, y, button, shift, alt, ctrl);
                 true
             }
             crate::terminal_keyboard::TerminalAction::TextCommit(text) => {

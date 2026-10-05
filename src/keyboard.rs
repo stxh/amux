@@ -304,12 +304,6 @@ pub fn handle_key_input(app: &mut App, key: &str, ctrl: bool, alt: bool, shift: 
         app.redraw_counter += 1;
         return true;
     }
-    if ctrl && !shift && !alt && key == "q" {
-        app.running = false;
-        app.status_message = "Quitting...".to_string();
-        app.redraw_counter += 1;
-        return true;
-    }
 
     // Not a shortcut - forward to active terminal PTY
     if let Some(pane) = app.active_pane_mut() {

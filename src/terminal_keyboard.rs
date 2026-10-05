@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use xilem::masonry::core::{
     Widget, EventCtx, PropertiesMut, PropertiesRef, TextEvent, PointerEvent,
     RegisterCtx, LayoutCtx, MeasureCtx, PaintCtx, AccessCtx, ChildrenIds,
-    WidgetPod, NewWidget, WidgetMut, AccessEvent, PointerScrollEvent, WidgetId,
+    WidgetPod, NewWidget, WidgetMut, AccessEvent, PointerScrollEvent, WidgetId, Modifiers,
 };
 use xilem::masonry::kurbo::{Size, Axis};
 use xilem::masonry::imaging::Painter;
@@ -34,12 +34,49 @@ pub struct KeyAction {
 #[derive(Debug, Clone)]
 pub enum TerminalAction {
     Key(KeyAction),
-    Scroll { delta_lines: i32 },
-    MouseDown { x: f64, y: f64, button: xilem::masonry::core::PointerButton },
-    MouseMove { x: f64, y: f64, is_dragging: bool },
-    MouseUp { x: f64, y: f64, button: xilem::masonry::core::PointerButton },
+    Scroll {
+        delta_lines: i32,
+        x: f64,
+        y: f64,
+        shift: bool,
+        alt: bool,
+        ctrl: bool,
+    },
+    MouseDown {
+        x: f64,
+        y: f64,
+        button: xilem::masonry::core::PointerButton,
+        shift: bool,
+        alt: bool,
+        ctrl: bool,
+    },
+    MouseMove {
+        x: f64,
+        y: f64,
+        is_dragging: bool,
+        shift: bool,
+        alt: bool,
+        ctrl: bool,
+    },
+    MouseUp {
+        x: f64,
+        y: f64,
+        button: xilem::masonry::core::PointerButton,
+        shift: bool,
+        alt: bool,
+        ctrl: bool,
+    },
     /// IME committed text (e.g., from CJK input method)
     TextCommit(String),
+}
+
+/// Extract shift/alt/ctrl booleans from a masonry Modifiers bitset.
+fn mods_split(m: &Modifiers) -> (bool, bool, bool) {
+    (
+        m.contains(Modifiers::SHIFT),
+        m.contains(Modifiers::ALT),
+        m.contains(Modifiers::CONTROL),
+    )
 }
 
 pub struct TerminalKeyboardWidget {
@@ -82,11 +119,14 @@ impl Widget for TerminalKeyboardWidget {
                 let x = pos.x;
                 let y = pos.y;
                 let button = pointer_event.button;
+                let (shift, alt, ctrl) = mods_split(&pointer_event.state.modifiers);
                 if button == Some(xilem::masonry::core::PointerButton::Primary) {
                     self.is_left_down = true;
                 }
                 if let Some(btn) = button {
-                    ctx.submit_action::<TerminalAction>(TerminalAction::MouseDown { x, y, button: btn });
+                    ctx.submit_action::<TerminalAction>(TerminalAction::MouseDown {
+                        x, y, button: btn, shift, alt, ctrl,
+                    });
                 }
             }
             PointerEvent::Up(pointer_event) => {
@@ -95,11 +135,14 @@ impl Widget for TerminalKeyboardWidget {
                 let x = pos.x;
                 let y = pos.y;
                 let button = pointer_event.button;
+                let (shift, alt, ctrl) = mods_split(&pointer_event.state.modifiers);
                 if button == Some(xilem::masonry::core::PointerButton::Primary) {
                     self.is_left_down = false;
                 }
                 if let Some(btn) = button {
-                    ctx.submit_action::<TerminalAction>(TerminalAction::MouseUp { x, y, button: btn });
+                    ctx.submit_action::<TerminalAction>(TerminalAction::MouseUp {
+                        x, y, button: btn, shift, alt, ctrl,
+                    });
                 }
             }
             PointerEvent::Move(pointer_event) => {
@@ -108,15 +151,21 @@ impl Widget for TerminalKeyboardWidget {
                 let pos = ctx.local_position(physical);
                 let x = pos.x;
                 let y = pos.y;
+                let (shift, alt, ctrl) = mods_split(&pointer_event.current.modifiers);
                 ctx.submit_action::<TerminalAction>(TerminalAction::MouseMove {
                     x,
                     y,
                     is_dragging: self.is_left_down,
+                    shift,
+                    alt,
+                    ctrl,
                 });
             }
-            PointerEvent::Scroll(PointerScrollEvent { delta, .. }) => {
+            PointerEvent::Scroll(PointerScrollEvent { delta, state, .. }) => {
                 ctx.request_focus();
                 use xilem::masonry::core::ScrollDelta;
+                let pos = ctx.local_position(state.position);
+                let (shift, alt, ctrl) = mods_split(&state.modifiers);
                 let lines = match delta {
                     ScrollDelta::LineDelta(_x, y) => *y as i32,
                     ScrollDelta::PixelDelta(pos) => {
@@ -129,7 +178,14 @@ impl Widget for TerminalKeyboardWidget {
                     }
                 };
                 if lines != 0 {
-                    ctx.submit_action::<TerminalAction>(TerminalAction::Scroll { delta_lines: lines });
+                    ctx.submit_action::<TerminalAction>(TerminalAction::Scroll {
+                        delta_lines: lines,
+                        x: pos.x,
+                        y: pos.y,
+                        shift,
+                        alt,
+                        ctrl,
+                    });
                     ctx.set_handled();
                 }
             }
