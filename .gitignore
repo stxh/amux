@@ -28,3 +28,8 @@ rustc-ice-*.txt
 
 # Vendored Ghostty source for libghostty-vt build (large; local only)
 vendor/ghostty-*
+
+# Manual test artifacts (screenshots, driving scripts, clipboard dumps)
+/tools/
+shot*.png
+clip.txt
