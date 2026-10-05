@@ -451,6 +451,68 @@ impl App {
         needs_redraw
     }
 
+    /// Close panes whose shell process has exited (e.g. after `exit`).
+    /// Cascades to tab/group removal; quitting the app when the last one closes.
+    pub fn reap_exited_panes(&mut self) {
+        let mut exited: Vec<(usize, usize, PaneId)> = Vec::new();
+        for (gi, group) in self.groups.iter().enumerate() {
+            for (ti, tab) in group.tabs.iter().enumerate() {
+                tab.pane_tree.for_each(&mut |pane, _| {
+                    if pane.terminal.shell_exited() {
+                        exited.push((gi, ti, pane.id));
+                    }
+                });
+            }
+        }
+        if exited.is_empty() {
+            return;
+        }
+        for (gi, ti, pane_id) in exited {
+            if self.groups.get(gi).is_none() {
+                continue;
+            }
+            self.active_group_index = gi;
+            let close_tab = if let Some(tab) = self.groups[gi].tabs.get_mut(ti) {
+                if tab.pane_tree.pane_count() > 1 {
+                    let next_id = tab.pane_tree.next_pane_id(pane_id);
+                    if tab.pane_tree.remove(pane_id) {
+                        tab.active_pane_id = if tab.pane_tree.find(next_id).is_some() {
+                            next_id
+                        } else {
+                            tab.pane_tree.first_pane_id()
+                        };
+                        if let Some((pane, _)) = tab.pane_tree.find_mut(tab.active_pane_id) {
+                            pane.set_active(true);
+                        }
+                    }
+                    false
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
+            if close_tab {
+                if self.groups[gi].tabs.len() > 1 {
+                    self.groups[gi].tabs.remove(ti);
+                    if self.groups[gi].active_tab_index >= self.groups[gi].tabs.len() {
+                        self.groups[gi].active_tab_index = self.groups[gi].tabs.len() - 1;
+                    }
+                } else if self.groups.len() > 1 {
+                    self.groups.remove(gi);
+                    if self.active_group_index >= self.groups.len() {
+                        self.active_group_index = self.groups.len() - 1;
+                    }
+                } else {
+                    self.running = false;
+                    return;
+                }
+            }
+        }
+        self.status_message = "Closed exited pane".to_string();
+        self.redraw_counter += 1;
+    }
+
     /// Scroll the active terminal pane by delta_lines (positive = scroll up into history, negative = scroll down)
     pub fn scroll_terminal(&mut self, delta_lines: i32) {
         if let Some(pane) = self.active_pane_mut() {

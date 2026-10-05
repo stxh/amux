@@ -8,9 +8,10 @@ use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptio
 use libghostty_vt::style::{Palette, RgbColor};
 use libghostty_vt::terminal::{Options as TerminalOptions, Point, PointCoordinate, ScrollViewport};
 use libghostty_vt::Terminal as GhosttyTerminal;
-use portable_pty::{Child, MasterPty, PtySize};
+use portable_pty::{MasterPty, PtySize};
 use std::cell::RefCell;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -73,6 +74,15 @@ pub(crate) struct Engine {
     pub cells: CellIterator<'static>,
 }
 
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        // Closing a pane must terminate its shell, or the process leaks.
+        if let Some(killer) = &mut self.child_killer {
+            let _ = killer.kill();
+        }
+    }
+}
+
 /// Wraps libghostty-vt's Terminal with PTY I/O.
 ///
 /// The Ghostty terminal is `!Send`, so it is owned by the UI thread inside a
@@ -81,11 +91,12 @@ pub(crate) struct Engine {
 pub struct Terminal {
     engine: RefCell<Engine>,
     pty_master: Option<Box<dyn MasterPty + Send>>,
-    child: Option<Box<dyn Child + Send>>,
+    child_killer: Option<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
     pty_writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     pty_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
     config: TerminalConfig,
     needs_redraw: Arc<Mutex<bool>>,
+    shell_exited: Arc<AtomicBool>,
     pub redraw_notifier: Arc<Mutex<Option<xilem::core::MessageProxy<()>>>>,
     pub title: Arc<Mutex<Option<String>>>,
     sel_anchor: Option<Point>,
@@ -94,6 +105,7 @@ pub struct Terminal {
 impl Terminal {
     pub fn new(config: &TerminalConfig) -> Self {
         let needs_redraw = Arc::new(Mutex::new(false));
+        let shell_exited = Arc::new(AtomicBool::new(false));
         let title = Arc::new(Mutex::new(None));
         let redraw_notifier: Arc<Mutex<Option<xilem::core::MessageProxy<()>>>> =
             Arc::new(Mutex::new(None));
@@ -157,11 +169,12 @@ impl Terminal {
         Self {
             engine: RefCell::new(Engine { term, render, rows, cells }),
             pty_master: None,
-            child: None,
+            child_killer: None,
             pty_writer,
             pty_rx: Arc::new(Mutex::new(rx)),
             config: config.clone(),
             needs_redraw,
+            shell_exited,
             redraw_notifier,
             title,
             sel_anchor: None,
@@ -187,8 +200,24 @@ impl Terminal {
         let pair = pty_system.openpty(size)?;
         let cmd = portable_pty::CommandBuilder::new_default_prog();
 
-        self.child = Some(pair.slave.spawn_command(cmd)?);
+        let child = pair.slave.spawn_command(cmd)?;
+        self.child_killer = Some(child.clone_killer());
         self.pty_master = Some(pair.master);
+
+        // On Windows the ConPTY reader never sees EOF when the shell exits,
+        // so a dedicated thread waits on the child and flags termination.
+        {
+            let shell_exited = self.shell_exited.clone();
+            let redraw_notifier = self.redraw_notifier.clone();
+            thread::spawn(move || {
+                let mut child = child;
+                let _ = child.wait();
+                shell_exited.store(true, Ordering::Relaxed);
+                if let Some(proxy) = &*redraw_notifier.lock().unwrap() {
+                    let _ = proxy.message(());
+                }
+            });
+        }
 
         // Split reader/writer for async I/O
         let reader;
@@ -203,6 +232,8 @@ impl Terminal {
         // raw chunks to the UI thread which feeds them to the terminal.
         let needs_redraw = self.needs_redraw.clone();
         let redraw_notifier = self.redraw_notifier.clone();
+        let shell_exited = self.shell_exited.clone();
+        let pty_writer = self.pty_writer.clone();
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         self.pty_rx = Arc::new(Mutex::new(rx));
 
@@ -238,6 +269,14 @@ impl Terminal {
                         }
                     }
                 }
+            }
+
+            // Shell exited (PTY EOF): drop the writer so any pending query
+            // callbacks stop, wake the UI, and keep the final output visible.
+            *pty_writer.lock().unwrap() = None;
+            shell_exited.store(true, Ordering::Relaxed);
+            if let Some(proxy) = &*redraw_notifier.lock().unwrap() {
+                let _ = proxy.message(());
             }
         });
 
@@ -276,6 +315,11 @@ impl Terminal {
         let val = *needs || fed;
         *needs = false;
         val
+    }
+
+    /// Whether the shell process has exited (PTY reader thread saw EOF).
+    pub fn shell_exited(&self) -> bool {
+        self.shell_exited.load(Ordering::Relaxed)
     }
 
     /// Get the active terminal shell title

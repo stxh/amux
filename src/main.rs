@@ -309,6 +309,7 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
                 state.redraw_counter += 1;
                 // println!("DEBUG: task_raw check_and_clear_redraw was TRUE! redraw_counter updated");
             }
+            state.reap_exited_panes();
             state.apply_pending_resizes();
         },
     );
