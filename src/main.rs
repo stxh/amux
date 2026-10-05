@@ -423,6 +423,11 @@ fn main() {
         win_opts = win_opts.with_initial_position(LogicalPosition::new(pos.x, pos.y));
     }
 
+    const ICON_RGBA32: &[u8] = include_bytes!("../assets/icon_rgba32.bin");
+    if let Ok(icon) = xilem::winit::window::Icon::from_rgba(ICON_RGBA32.to_vec(), 32, 32) {
+        win_opts = win_opts.with_initial_window_icon(Some(icon));
+    }
+
     let app = Xilem::new_simple(app_state, app_logic, win_opts);
 
     app.run_in(EventLoop::with_user_event()).unwrap();

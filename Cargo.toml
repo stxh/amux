@@ -40,4 +40,8 @@ dirs = "6"
 # type mismatch between rustix::fd::OwnedFd and std::os::fd::OwnedFd.
 rustix = "0.38"
 
+[build-dependencies]
+embed-resource = "=3.0.11"
+
+
 
