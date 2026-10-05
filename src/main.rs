@@ -1,3 +1,7 @@
+// GUI subsystem: no console window when launched by double-click.
+// Tracing output still honors stderr redirection (files) from a shell.
+#![windows_subsystem = "windows"]
+
 mod app;
 mod config;
 mod group;
