@@ -9,7 +9,7 @@ use libghostty_vt::style::{RgbColor, Underline};
 
 use xilem::masonry::core::render_text;
 use xilem::masonry::imaging::{Painter, record::Scene};
-use xilem::masonry::kurbo::{Affine, Rect, Size, Stroke};
+use xilem::masonry::kurbo::{Affine, Rect, Size};
 use xilem::masonry::parley::style::{FontFamily, FontFamilyName, GenericFamily, StyleProperty};
 
 use xilem::masonry::peniko::{Brush, Color};
@@ -23,11 +23,11 @@ mod colors {
     pub const SURFACE1:  Color = Color::from_rgba8(0x45, 0x47, 0x5a, 0xff);
     pub const TEXT:      Color = Color::from_rgba8(0xc6, 0xd0, 0xf5, 0xff);
     pub const BLUE:      Color = Color::from_rgba8(0x89, 0xb4, 0xfa, 0xff);
-
-    // Sleek dimmed border colors
-    pub const ACTIVE_BORDER:   Color = Color::from_rgba8(0x3b, 0x59, 0x7f, 0xff); // Classy muted steel blue
-    pub const INACTIVE_BORDER: Color = Color::from_rgba8(0x22, 0x22, 0x30, 0xff); // Elegant subtle dark grey
 }
+
+/// Inset between a pane's edge and its text grid. Shared by the renderer,
+/// the grid-resize math and click/selection coordinate mapping.
+pub const PANE_MARGIN: f64 = 6.0;
 
 fn rgb_to_color(c: RgbColor) -> Color {
     Color::from_rgba8(c.r, c.g, c.b, 0xff)
@@ -76,7 +76,7 @@ pub fn render_terminal_with_offset(
     fcx: &mut xilem::masonry::parley::FontContext,
     lcx: &mut xilem::masonry::parley::LayoutContext<xilem::masonry::core::BrushIndex>,
 ) {
-    const MARGIN: f64 = 12.0;
+    const MARGIN: f64 = PANE_MARGIN;
 
     // Background for this pane
     let rect = Rect::new(offset_x, offset_y, offset_x + size.width, offset_y + size.height);
@@ -339,11 +339,6 @@ pub fn render_terminal_with_offset(
 
     // Drop snapshot/iterators before releasing the engine borrow scope.
     drop(row_iter);
-
-    // Border
-    let border_color = if is_active { colors::ACTIVE_BORDER } else { colors::INACTIVE_BORDER };
-    let border = Stroke::new(2.0);
-    painter.stroke(&rect, &border, border_color).draw();
 
     // Scrollbar — always visible track with proportional thumb
     {

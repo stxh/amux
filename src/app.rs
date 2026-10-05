@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::terminal_render::PANE_MARGIN;
 use crate::group::TerminalGroup;
 use crate::pane::Pane;
 use crate::pane_tree::{PaneId, SplitDirection};
@@ -637,9 +638,9 @@ impl App {
                         let cols = pane.terminal.grid_cols();
                         let rows = pane.terminal.grid_rows();
 
-                        let col = (((px - rect.x - 12.0) / self.cell_w).floor().max(0.0) as usize)
+                        let col = (((px - rect.x - PANE_MARGIN) / self.cell_w).floor().max(0.0) as usize)
                             .min(cols.saturating_sub(1));
-                        let row = (((py - rect.y - 12.0) / self.cell_h).floor().max(0.0) as usize)
+                        let row = (((py - rect.y - PANE_MARGIN) / self.cell_h).floor().max(0.0) as usize)
                             .min(rows.saturating_sub(1));
 
                         if button == xilem::masonry::core::PointerButton::Primary {
@@ -684,8 +685,8 @@ impl App {
             if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
                 if let Some((pane, _)) = tab.pane_tree.find_mut(pane_id) {
                     if pane.terminal.mouse_is_reporting() {
-                        let gx = (px - rect.x - 12.0).max(0.0) as f32;
-                        let gy = (py - rect.y - 12.0).max(0.0) as f32;
+                        let gx = (px - rect.x - PANE_MARGIN).max(0.0) as f32;
+                        let gy = (py - rect.y - PANE_MARGIN).max(0.0) as f32;
                         pane.terminal.mouse_report(btn_id, 0, true, gx, gy, shift, alt, ctrl);
                         self.mouse_down_btn = Some(btn_id);
                         self.redraw_counter += 1;
@@ -729,9 +730,9 @@ impl App {
                     let cols = pane.terminal.grid_cols();
                     let rows = pane.terminal.grid_rows();
 
-                    let col = (((px - active_rect.x - 12.0) / self.cell_w).floor().max(0.0) as usize)
+                    let col = (((px - active_rect.x - PANE_MARGIN) / self.cell_w).floor().max(0.0) as usize)
                         .min(cols.saturating_sub(1));
-                    let row = (((py - active_rect.y - 12.0) / self.cell_h).floor().max(0.0) as usize)
+                    let row = (((py - active_rect.y - PANE_MARGIN) / self.cell_h).floor().max(0.0) as usize)
                         .min(rows.saturating_sub(1));
 
                     pane.terminal.update_selection(row as i32, col);
@@ -788,8 +789,8 @@ impl App {
                         if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
                             if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
                                 if pane.terminal.mouse_is_reporting() {
-                                    let gx = (px - rect.x - 12.0).max(0.0) as f32;
-                                    let gy = (py - rect.y - 12.0).max(0.0) as f32;
+                                    let gx = (px - rect.x - PANE_MARGIN).max(0.0) as f32;
+                                    let gy = (py - rect.y - PANE_MARGIN).max(0.0) as f32;
                                     let btn = if delta_lines > 0 { 3 } else { 4 };
                                     pane.terminal.mouse_report(btn, 0, false, gx, gy, shift, alt, ctrl);
                                     self.redraw_counter += 1;
@@ -829,8 +830,8 @@ impl App {
             if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
                 if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
                     if pane.terminal.mouse_is_reporting() {
-                        let gx = (px - rect.x - 12.0).max(0.0) as f32;
-                        let gy = (py - rect.y - 12.0).max(0.0) as f32;
+                        let gx = (px - rect.x - PANE_MARGIN).max(0.0) as f32;
+                        let gy = (py - rect.y - PANE_MARGIN).max(0.0) as f32;
                         pane.terminal.mouse_report(btn, 2, true, gx, gy, shift, alt, ctrl);
                         self.redraw_counter += 1;
                         return true;
@@ -870,8 +871,8 @@ impl App {
             if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
                 if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
                     if pane.terminal.mouse_is_reporting() {
-                        let gx = (px - rect.x - 12.0).max(0.0) as f32;
-                        let gy = (py - rect.y - 12.0).max(0.0) as f32;
+                        let gx = (px - rect.x - PANE_MARGIN).max(0.0) as f32;
+                        let gy = (py - rect.y - PANE_MARGIN).max(0.0) as f32;
                         pane.terminal.mouse_report(btn_id, 1, false, gx, gy, shift, alt, ctrl);
                         self.redraw_counter += 1;
                         return true;

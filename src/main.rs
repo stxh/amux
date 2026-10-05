@@ -23,6 +23,29 @@ pub mod win_util {
         fn GetWindowRect(hwnd: *mut c_void, rect: *mut std::ffi::c_void) -> i32;
     }
 
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(hwnd: *mut c_void, attr: u32, val: *const u32, len: u32) -> i32;
+    }
+
+    /// Windows 11: request rounded window corners from DWM.
+    pub fn set_rounded_corners() {
+        const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+        const DWMWCP_ROUND: u32 = 2;
+        unsafe {
+            let hwnd = GetActiveWindow();
+            if !hwnd.is_null() {
+                let pref = DWMWCP_ROUND;
+                DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_WINDOW_CORNER_PREFERENCE,
+                    &pref,
+                    std::mem::size_of::<u32>() as u32,
+                );
+            }
+        }
+    }
+
     const WM_NCLBUTTONDOWN: u32 = 0x00A1;
     const HTCAPTION: usize = 2;
     const SW_MINIMIZE: i32 = 6;
@@ -130,7 +153,6 @@ use std::time::Duration;
 
 // ─── Catppuccin Mocha Colors ───
 const CRUST: Color = Color::from_rgba8(0x11, 0x11, 0x1b, 0xff);
-#[allow(dead_code)]
 const BASE: Color = Color::from_rgba8(0x1e, 0x1e, 0x2e, 0xff);
 const MANTLE: Color = Color::from_rgba8(0x18, 0x18, 0x25, 0xff);
 const SURFACE0: Color = Color::from_rgba8(0x31, 0x32, 0x44, 0xff);
@@ -142,7 +164,7 @@ const TEAL: Color = Color::from_rgba8(0x94, 0xe2, 0xd5, 0xff);
 
 fn sidebar_item(idx: usize, text: String, is_active: bool, is_plus: bool) -> impl WidgetView<App> + use<> {
     let bg = if is_active {
-        SURFACE0
+        BASE
     } else {
         Color::from_rgba8(0x00, 0x00, 0x00, 0x00) // transparent
     };
@@ -157,8 +179,8 @@ fn sidebar_item(idx: usize, text: String, is_active: bool, is_plus: bool) -> imp
             }
         })
     )
-    .fixed_width(Length::px(36.0))
-    .fixed_height(Length::px(36.0))
+    .fixed_width(Length::px(32.0))
+    .fixed_height(Length::px(32.0))
     .background(bg)
     .padding(2.0)
 }
@@ -176,10 +198,10 @@ fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
 
     if state.show_sidebar {
         // Group Add button
-        items.push(sidebar_item(999, "+".to_string(), false, true));
+        items.push(sidebar_item(999, "➕".to_string(), false, true));
     }
 
-    let width = if state.show_sidebar { 44.0 } else { 0.0 };
+    let width = if state.show_sidebar { 40.0 } else { 0.0 };
 
     sized_box(
         flex_col((
@@ -218,7 +240,7 @@ fn right_sidebar(state: &App) -> impl WidgetView<App> + use<> {
 
 fn tab_item(idx: usize, text: String, is_active: bool) -> impl WidgetView<App> + use<> {
     let bg_color = if is_active {
-        Color::from_rgba8(0x45, 0x47, 0x5a, 0xff) // Surface 1
+        SURFACE0
     } else {
         Color::from_rgba8(0x1e, 0x1e, 0x2e, 0x00) // Transparent
     };
@@ -230,13 +252,13 @@ fn tab_item(idx: usize, text: String, is_active: bool) -> impl WidgetView<App> +
             data.switch_tab(idx);
         })
         .padding(0.0), 
-        crate::terminal_keyboard::focusless_button(label("x").text_size(11.0), move |data: &mut App| {
+        crate::terminal_keyboard::focusless_button(label("×").text_size(13.0), move |data: &mut App| {
             data.remove_tab_at(idx);
         })
         .padding(0.0),
     ))
     .background(bg_color)
-    .padding(4.0)
+    .padding(2.0)
 }
 
 /// Tab bar with active group's tabs
@@ -269,7 +291,7 @@ fn tab_bar(state: &App) -> impl WidgetView<App> + use<> {
         }
     }
 
-    let add_tab_btn = crate::terminal_keyboard::focusless_button(label(" + "), |data: &mut App| {
+    let add_tab_btn = crate::terminal_keyboard::focusless_button(label("➕"), |data: &mut App| {
         data.add_tab();
     });
 
@@ -296,6 +318,8 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
     let _redraw_trigger = task_raw(
         |proxy, state: &mut App| {
             state.register_redraw_proxy(proxy.clone());
+            #[cfg(target_os = "windows")]
+            win_util::set_rounded_corners();
             async move {
                 // println!("DEBUG: task_raw future spawned (now 100% event-driven)!");
                 loop {
