@@ -33,6 +33,43 @@ fn rgb_to_color(c: RgbColor) -> Color {
     Color::from_rgba8(c.r, c.g, c.b, 0xff)
 }
 
+/// Characters that must tile seamlessly across rows (box drawing, block
+/// elements, braille). These get stretched to the full cell height when CJK
+/// metrics inflate `cell_h` beyond the primary font's line height.
+fn is_cell_filler(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|ch| {
+            matches!(ch,
+                '\u{2500}'..='\u{259F}' | // box drawing + block elements
+                '\u{2800}'..='\u{28FF}')  // braille patterns
+        })
+}
+
+/// Position a glyph layout at its cell, sharing the row baseline. For
+/// cell-filling glyphs with `stretch`, scale vertically about the baseline so
+/// consecutive rows meet exactly.
+fn glyph_transform(
+    s: &str,
+    x: f64,
+    y: f64,
+    baseline_ascent: f64,
+    layout: &xilem::masonry::parley::Layout<xilem::masonry::core::BrushIndex>,
+    stretch: bool,
+    ratio: f64,
+) -> Affine {
+    let char_ascent = layout
+        .lines()
+        .next()
+        .map_or(baseline_ascent, |l| l.metrics().baseline as f64);
+    if stretch && is_cell_filler(s) {
+        Affine::translate((x, y + baseline_ascent))
+            * Affine::scale_non_uniform(1.0, ratio)
+            * Affine::translate((0.0, -char_ascent))
+    } else {
+        Affine::translate((x, y + baseline_ascent - char_ascent))
+    }
+}
+
 /// Terminal pane state (maintained separately from the terminal itself).
 /// Scrolling is now owned by the ghostty engine, so there is no app-side
 /// scroll offset anymore.
@@ -87,7 +124,7 @@ pub fn render_terminal_with_offset(
     // cell_h, because CJK fallback fonts (e.g. PingFang on macOS) often have
     // taller metrics than the primary monospace font, causing Chinese glyphs
     // to overflow the selection-highlight rect.
-    let cell_w = {
+    let (cell_w, latin_line_h) = {
         let probe = "MMMMMMMMMM";
         let mut mb = lcx.ranged_builder(fcx, probe, 1.0, true);
         mb.push_default(StyleProperty::FontFamily(FontFamily::Single(
@@ -96,7 +133,7 @@ pub fn render_terminal_with_offset(
         mb.push_default(StyleProperty::FontSize(font_size));
         let mut ml = mb.build(probe);
         ml.break_all_lines(None);
-        ml.width() as f64 / 10.0
+        (ml.width() as f64 / 10.0, ml.height() as f64)
     };
     let (cell_h, baseline_ascent) = {
         let probe = "MMMMMMMMMM你好"; // Mixed to get the taller metrics
@@ -113,6 +150,9 @@ pub fn render_terminal_with_offset(
         let ascent = ml.lines().next().map_or(h * 0.8, |l| l.metrics().baseline as f64);
         (h, ascent)
     };
+    // Vertical stretch for cell-filling glyphs (box drawing / blocks) so they
+    // stay contiguous when CJK metrics make cell_h taller than the font line.
+    let stretch_ratio = (cell_h / latin_line_h).max(1.0);
 
     let max_displayable_rows = ((size.height - 2.0 * MARGIN).max(0.0) / cell_h).floor() as usize;
 
@@ -312,6 +352,7 @@ pub fn render_terminal_with_offset(
             )));
             builder.push_default(StyleProperty::FontSize(font_size));
 
+            let stretch = stretch_ratio > 1.005 && is_cell_filler(s);
             if fg_color != colors::TEXT {
                 let brush = Brush::Solid(fg_color);
                 builder.push(
@@ -320,16 +361,12 @@ pub fn render_terminal_with_offset(
                 );
                 let mut layout = builder.build(s);
                 layout.break_all_lines(None);
-                let char_ascent = layout.lines().next().map_or(baseline_ascent, |l| l.metrics().baseline as f64);
-                let ty = y + baseline_ascent - char_ascent;
-                let transform = Affine::translate((x, ty));
+                let transform = glyph_transform(s, x, y, baseline_ascent, &layout, stretch, stretch_ratio);
                 render_text(painter, transform, &layout, &[Brush::Solid(colors::TEXT), brush], true);
             } else {
                 let mut layout = builder.build(s);
                 layout.break_all_lines(None);
-                let char_ascent = layout.lines().next().map_or(baseline_ascent, |l| l.metrics().baseline as f64);
-                let ty = y + baseline_ascent - char_ascent;
-                let transform = Affine::translate((x, ty));
+                let transform = glyph_transform(s, x, y, baseline_ascent, &layout, stretch, stretch_ratio);
                 render_text(painter, transform, &layout, &[Brush::Solid(colors::TEXT)], true);
             }
         }

@@ -335,6 +335,15 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
             }
             state.reap_exited_panes();
             state.apply_pending_resizes();
+            if !state.running {
+                // masonry_winit only checks its exit flag after window events,
+                // but this callback runs on the user-event path, so the flag
+                // would never be acted on. Save config and exit directly.
+                state.window_maximized = win_util::is_window_maximized();
+                let pos = win_util::get_window_position();
+                state.save_config(pos);
+                std::process::exit(0);
+            }
         },
     );
 
