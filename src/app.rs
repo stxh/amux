@@ -389,6 +389,10 @@ impl App {
                 "t" => self.add_tab(),
                 "w" => self.remove_tab(),
                 "g" => self.next_group(),
+                "b" => {
+                    self.show_sidebar = !self.show_sidebar;
+                    self.status_message = format!("Sidebar visibility: {}", self.show_sidebar);
+                }
                 _ => {
                     // Check for tab switching with number keys
                     if let Ok(num) = key.parse::<usize>() {

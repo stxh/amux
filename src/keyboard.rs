@@ -16,6 +16,13 @@ use crate::terminal::Terminal;
 /// Handle a keyboard character event with modifier information
 /// This implements the comprehensive direct hotkey table (Windows Ctrl maps to Mac ⌘)
 pub fn handle_key_input(app: &mut App, key: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
+    // ─── tmux-style prefix: next plain key is a multiplexer command ───
+    if app.prefix_mode && !ctrl && !alt {
+        app.handle_key(key);
+        app.redraw_counter += 1;
+        return true;
+    }
+
     // ─── Workspaces (Groups) ───
     if ctrl && !shift && !alt && key == "n" {
         app.add_group();
@@ -56,8 +63,8 @@ pub fn handle_key_input(app: &mut App, key: &str, ctrl: bool, alt: bool, shift: 
         return true;
     }
     if ctrl && !shift && !alt && key == "b" {
-        app.show_sidebar = !app.show_sidebar;
-        app.status_message = format!("Sidebar visibility: {}", app.show_sidebar);
+        app.prefix_mode = true;
+        app.status_message = "PREFIX - waiting for command...".to_string();
         app.redraw_counter += 1;
         return true;
     }
@@ -454,10 +461,9 @@ pub fn handle_text_input(app: &mut App, text: &str) {
 
     // In prefix mode, first character is the command
     if app.prefix_mode {
-        app.prefix_mode = false;
         if let Some(first_char) = text.chars().next() {
-            let key = first_char.to_string();
-            handle_key_input(app, &key, false, false, false);
+            app.handle_key(&first_char.to_string());
+            app.redraw_counter += 1;
         }
         return;
     }
