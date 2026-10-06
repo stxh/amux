@@ -232,7 +232,6 @@ impl Terminal {
         // raw chunks to the UI thread which feeds them to the terminal.
         let needs_redraw = self.needs_redraw.clone();
         let redraw_notifier = self.redraw_notifier.clone();
-        let shell_exited = self.shell_exited.clone();
         let pty_writer = self.pty_writer.clone();
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         self.pty_rx = Arc::new(Mutex::new(rx));
@@ -271,10 +270,12 @@ impl Terminal {
                 }
             }
 
-            // Shell exited (PTY EOF): drop the writer so any pending query
-            // callbacks stop, wake the UI, and keep the final output visible.
+            // PTY read broke. This is NOT proof the shell exited: ConPTY can
+            // transiently break its output pipe (e.g. when a full-screen TUI
+            // resets the console on exit) while the shell is still alive.
+            // Only the child.wait() thread may flag shell exit. Drop the
+            // writer so any pending query callbacks stop, and wake the UI.
             *pty_writer.lock().unwrap() = None;
-            shell_exited.store(true, Ordering::Relaxed);
             if let Some(proxy) = &*redraw_notifier.lock().unwrap() {
                 let _ = proxy.message(());
             }
