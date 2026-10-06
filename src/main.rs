@@ -248,21 +248,26 @@ fn tab_item(idx: usize, text: String, is_active: bool) -> impl WidgetView<App> +
     } else {
         Color::from_rgba8(0x1e, 0x1e, 0x2e, 0x00) // Transparent
     };
+    let fg = if is_active {
+        TEXT_COLOR
+    } else {
+        Color::from_rgba8(0x7f, 0x84, 0x9c, 0xff) // muted (subtext0)
+    };
 
-    // Style the tabs to look like a single integrated unit.
-    // We use two buttons but remove the gap between them.
+    // Rounded index-card tab: pill-shaped card, active one filled.
     flex_row((
-        crate::terminal_keyboard::focusless_button(label(text), move |data: &mut App| {
+        crate::terminal_keyboard::focusless_button(label(text).text_size(12.0).color(fg), move |data: &mut App| {
             data.switch_tab(idx);
         })
-        .padding(0.0), 
-        crate::terminal_keyboard::focusless_button(label("×").text_size(13.0), move |data: &mut App| {
+        .padding(0.0),
+        crate::terminal_keyboard::focusless_button(label("×").text_size(13.0).color(fg), move |data: &mut App| {
             data.remove_tab_at(idx);
         })
         .padding(0.0),
     ))
     .background(bg_color)
-    .padding(2.0)
+    .corner_radius(8.0)
+    .padding(xilem::masonry::properties::Padding { left: 10.0, right: 6.0, top: 4.0, bottom: 4.0 })
 }
 
 /// Tab bar with active group's tabs

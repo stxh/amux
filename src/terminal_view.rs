@@ -79,7 +79,7 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
 
         for (pane_id, rect) in &layouts {
             if available_size.width > 0.0 && available_size.height > 0.0 {
-                let new_cols = ((rect.width - 2.0 * MARGIN).max(0.0) / cell_w).floor() as u16;
+                let new_cols = ((rect.width - MARGIN).max(0.0) / cell_w).floor() as u16;
                 let new_rows = ((rect.height - 2.0 * MARGIN).max(0.0) / cell_h).floor() as u16;
                 let new_cols = new_cols.max(2);
                 let new_rows = new_rows.max(2);

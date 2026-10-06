@@ -114,6 +114,8 @@ pub fn render_terminal_with_offset(
     lcx: &mut xilem::masonry::parley::LayoutContext<xilem::masonry::core::BrushIndex>,
 ) {
     const MARGIN: f64 = PANE_MARGIN;
+    // Text sits flush against the left edge (sidebar side); other edges keep MARGIN.
+    const LEFT: f64 = 0.0;
 
     // Background for this pane
     let rect = Rect::new(offset_x, offset_y, offset_x + size.width, offset_y + size.height);
@@ -263,7 +265,7 @@ pub fn render_terminal_with_offset(
             if cell.is_spacer || cell.selected || cell.bg.is_none() {
                 continue;
             }
-            let bx = offset_x + MARGIN + cell.x as f64 * cell_w;
+            let bx = offset_x + LEFT + cell.x as f64 * cell_w;
             let w = if cell.wide { cell_w * 2.0 } else { cell_w };
             let bg_color = cell.bg.unwrap();
             let cell_rect = Rect::new(bx, bg_row_y, bx + w, bg_row_y + cell_h);
@@ -275,8 +277,8 @@ pub fn render_terminal_with_offset(
             if let Some(sel) = row_sel {
                 let start = (sel.start_x as usize).min(cols - 1);
                 let end = (sel.end_x as usize).min(cols - 1);
-                let bx = offset_x + MARGIN + start as f64 * cell_w;
-                let ex = offset_x + MARGIN + (end + 1) as f64 * cell_w;
+                let bx = offset_x + LEFT + start as f64 * cell_w;
+                let ex = offset_x + LEFT + (end + 1) as f64 * cell_w;
                 let sel_rect = Rect::new(bx, bg_row_y, ex, bg_row_y + cell_h);
                 painter.fill(&sel_rect, colors::BLUE).draw();
             }
@@ -287,7 +289,7 @@ pub fn render_terminal_with_offset(
             if cell.is_spacer || (!cell.underline && !cell.strikethrough) {
                 continue;
             }
-            let ux = offset_x + MARGIN + cell.x as f64 * cell_w;
+            let ux = offset_x + LEFT + cell.x as f64 * cell_w;
             let w = if cell.wide { cell_w * 2.0 } else { cell_w };
             if cell.underline {
                 let ul_rect = Rect::new(ux, bg_row_y + cell_h - 2.0, ux + w, bg_row_y + cell_h);
@@ -323,7 +325,7 @@ pub fn render_terminal_with_offset(
                     .find(|c| c.x == cx)
                     .map(|c| if c.wide { cell_w * 2.0 } else { cell_w })
                     .unwrap_or(cell_w);
-                let cursor_x = offset_x + MARGIN + cx as f64 * cell_w;
+                let cursor_x = offset_x + LEFT + cx as f64 * cell_w;
                 let cursor_rect = Rect::new(cursor_x, bg_row_y, cursor_x + cursor_w, bg_row_y + cell_h);
                 painter.fill(&cursor_rect, cursor_brush).draw();
             }
@@ -343,7 +345,7 @@ pub fn render_terminal_with_offset(
             } else {
                 cell.fg
             };
-            let x = offset_x + MARGIN + cell.x as f64 * cell_w;
+            let x = offset_x + LEFT + cell.x as f64 * cell_w;
 
             let s = &cell.text;
             let mut builder = lcx.ranged_builder(fcx, s, 1.0, true);
@@ -377,8 +379,8 @@ pub fn render_terminal_with_offset(
     // Drop snapshot/iterators before releasing the engine borrow scope.
     drop(row_iter);
 
-    // Scrollbar — always visible track with proportional thumb
-    {
+    // Scrollbar — only shown when there is scrollback beyond the viewport.
+    if sb_total > sb_len {
         let track_width = 8.0;
         let track_x = offset_x + size.width - track_width - MARGIN;
         let track_rect = Rect::new(track_x, offset_y + MARGIN, track_x + track_width, offset_y + size.height - MARGIN);
@@ -386,7 +388,7 @@ pub fn render_terminal_with_offset(
         painter.fill(&track_rect, Color::from_rgba8(0x18, 0x18, 0x25, 0x80)).draw();
 
         // Thumb — size proportional to viewport/total, position from engine scrollbar offset
-        if sb_total > 0 {
+        {
             let scrollable_h = size.height - 2.0 * MARGIN;
             let viewport_ratio = (sb_len as f64 / sb_total as f64).min(1.0);
             let thumb_h = (scrollable_h * viewport_ratio).max(20.0);
