@@ -24,6 +24,8 @@ pub struct TerminalConfig {
     pub cols: u16,
     pub cell_width: u16,
     pub cell_height: u16,
+    /// Initial working directory for spawned shells (from `amux <path>`).
+    pub working_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for TerminalConfig {
@@ -33,6 +35,7 @@ impl Default for TerminalConfig {
             cols: 80,
             cell_width: 10,
             cell_height: 28,
+            working_dir: None,
         }
     }
 }
@@ -97,6 +100,7 @@ pub struct Terminal {
     config: TerminalConfig,
     needs_redraw: Arc<Mutex<bool>>,
     shell_exited: Arc<AtomicBool>,
+    shell_aborted: Arc<Mutex<Option<u32>>>,
     pub redraw_notifier: Arc<Mutex<Option<xilem::core::MessageProxy<()>>>>,
     pub title: Arc<Mutex<Option<String>>>,
     sel_anchor: Option<Point>,
@@ -106,6 +110,7 @@ impl Terminal {
     pub fn new(config: &TerminalConfig) -> Self {
         let needs_redraw = Arc::new(Mutex::new(false));
         let shell_exited = Arc::new(AtomicBool::new(false));
+        let shell_aborted = Arc::new(Mutex::new(None));
         let title = Arc::new(Mutex::new(None));
         let redraw_notifier: Arc<Mutex<Option<xilem::core::MessageProxy<()>>>> =
             Arc::new(Mutex::new(None));
@@ -175,6 +180,7 @@ impl Terminal {
             config: config.clone(),
             needs_redraw,
             shell_exited,
+            shell_aborted,
             redraw_notifier,
             title,
             sel_anchor: None,
@@ -198,7 +204,10 @@ impl Terminal {
         };
 
         let pair = pty_system.openpty(size)?;
-        let cmd = portable_pty::CommandBuilder::new_default_prog();
+        let mut cmd = portable_pty::CommandBuilder::new_default_prog();
+        if let Some(dir) = &self.config.working_dir {
+            cmd.cwd(dir);
+        }
 
         let child = pair.slave.spawn_command(cmd)?;
         self.child_killer = Some(child.clone_killer());
@@ -206,13 +215,26 @@ impl Terminal {
 
         // On Windows the ConPTY reader never sees EOF when the shell exits,
         // so a dedicated thread waits on the child and flags termination.
+        // Only a clean exit (status 0, e.g. the user typed `exit`) closes the
+        // pane. A shell killed by a child TUI (e.g. opencode's parent-kill
+        // bug) is an abnormal exit: keep the window alive and notify instead.
         {
             let shell_exited = self.shell_exited.clone();
+            let shell_aborted = self.shell_aborted.clone();
             let redraw_notifier = self.redraw_notifier.clone();
             thread::spawn(move || {
                 let mut child = child;
-                let _ = child.wait();
-                shell_exited.store(true, Ordering::Relaxed);
+                match child.wait() {
+                    Ok(status) if status.success() => {
+                        shell_exited.store(true, Ordering::Relaxed);
+                    }
+                    Ok(status) => {
+                        if let Ok(mut c) = shell_aborted.lock() {
+                            *c = Some(status.exit_code());
+                        }
+                    }
+                    Err(_) => {}
+                }
                 if let Some(proxy) = &*redraw_notifier.lock().unwrap() {
                     let _ = proxy.message(());
                 }
@@ -321,6 +343,21 @@ impl Terminal {
     /// Whether the shell process has exited (PTY reader thread saw EOF).
     pub fn shell_exited(&self) -> bool {
         self.shell_exited.load(Ordering::Relaxed)
+    }
+
+    /// Take the abnormal shell exit code once (killed by a child TUI, etc.).
+    /// The pane is kept alive so the user sees the message and closes it.
+    pub fn take_shell_abort(&self) -> Option<u32> {
+        let mut code = self.shell_aborted.lock().unwrap();
+        code.take()
+    }
+
+    /// Append a notice line to the terminal grid (UI thread).
+    pub fn print_notice(&self, text: &str) {
+        let mut payload = String::from("\r\n");
+        payload.push_str(text);
+        self.engine.borrow_mut().term.vt_write(payload.as_bytes());
+        *self.needs_redraw.lock().unwrap() = true;
     }
 
     /// Get the active terminal shell title

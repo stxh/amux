@@ -7,6 +7,10 @@ pub struct Config {
     pub font_size: f64,
     #[serde(default)]
     pub window: WindowConfig,
+    /// Later `amux` invocations forward their path to the running instance
+    /// (opened as a new tab) and exit, instead of opening a second window.
+    #[serde(default)]
+    pub single_instance: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +51,7 @@ impl Default for Config {
         Self {
             font_size: default_font_size(),
             window: WindowConfig::default(),
+            single_instance: false,
         }
     }
 }

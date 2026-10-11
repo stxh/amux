@@ -8,6 +8,7 @@ mod group;
 mod keyboard;
 mod pane;
 mod pane_tree;
+mod single_instance;
 mod tab;
 mod terminal;
 mod terminal_keyboard;
@@ -92,6 +93,31 @@ pub mod win_util {
         std::process::exit(0);
     }
 
+    extern "system" {
+        fn FindWindowW(class: *const u16, title: *const u16) -> *mut c_void;
+        fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
+        fn IsIconic(hwnd: *mut c_void) -> i32;
+    }
+
+    /// Restore and focus the main window (used by single-instance activation).
+    pub fn bring_to_front() {
+        const SW_RESTORE: i32 = 9;
+        let title: Vec<u16> = "amux - Terminal Multiplexer"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+            if hwnd.is_null() {
+                return;
+            }
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            SetForegroundWindow(hwnd);
+        }
+    }
+
     #[repr(C)]
     struct RECT {
         left: i32,
@@ -143,6 +169,7 @@ pub mod win_util {
     pub fn is_window_maximized() -> bool {
         false
     }
+    pub fn bring_to_front() {}
 }
 
 use app::App;
@@ -150,6 +177,7 @@ use xilem::core::fork;
 use xilem::view::{flex_col, label, flex_row, sized_box, zstack, task_raw, FlexExt, CrossAxisAlignment};
 use xilem::style::Style;
 use xilem::masonry::layout::Length;
+use xilem::masonry::properties::Gap;
 use xilem::{EventLoop, WidgetView, WindowOptions, Xilem};
 use xilem::dpi::LogicalSize;
 use xilem::masonry::peniko::Color;
@@ -342,6 +370,7 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
                 state.redraw_counter += 1;
                 // println!("DEBUG: task_raw check_and_clear_redraw was TRUE! redraw_counter updated");
             }
+            state.poll_single_instance();
             state.reap_exited_panes();
             state.apply_pending_resizes();
             if !state.running {
@@ -351,6 +380,7 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
                 state.window_maximized = win_util::is_window_maximized();
                 let pos = win_util::get_window_position();
                 state.save_config(pos);
+                state.shutdown_single();
                 std::process::exit(0);
             }
         },
@@ -400,14 +430,14 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
             terminal_area,
             keyboard_capture,
         )).flex(1.0),
-    )).cross_axis_alignment(CrossAxisAlignment::Stretch);
+    )).cross_axis_alignment(CrossAxisAlignment::Stretch).prop(Gap::ZERO);
 
     // Root layout: sidebar | content | right_sidebar
     let main_view = flex_row((
         sidebar(data),
         content.flex(1.0),
         right_sidebar(data),
-    )).cross_axis_alignment(CrossAxisAlignment::Stretch);
+    )).cross_axis_alignment(CrossAxisAlignment::Stretch).prop(Gap::ZERO);
 
     fork(main_view, Some(_redraw_trigger))
 }
@@ -425,7 +455,53 @@ fn main() {
     log::info!("Loaded config from {:?}", config::Config::path());
     log::info!("  font_size: {}, window: {}x{}", cfg.font_size, cfg.window.width, cfg.window.height);
 
-    let app_state = App::new(cfg.clone());
+    // CLI: `amux <path>` starts shells in the given directory.
+    let mut working_dir: Option<std::path::PathBuf> = None;
+    let mut raw_path: Option<std::ffi::OsString> = None;
+    {
+        use std::ffi::OsString;
+        let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
+        if let Some(first) = raw.first() {
+            let shown = first.to_string_lossy().into_owned();
+            if shown == "-h" || shown == "--help" {
+                eprintln!(
+                    "Usage: amux [path]\n  \
+                     path   directory to open the terminal in\n  \
+                     With single_instance=true in config.toml, a second `amux`\n  \
+                     forwards its path to the running window as a new tab and exits."
+                );
+                return;
+            }
+            let path = std::path::PathBuf::from(first);
+            let abs = if path.is_absolute() {
+                path.clone()
+            } else {
+                std::env::current_dir().map(|c| c.join(&path)).unwrap_or(path.clone())
+            };
+            if !abs.is_dir() {
+                eprintln!("amux: not a directory: {shown}");
+                std::process::exit(1);
+            }
+            working_dir = Some(abs);
+            raw_path = Some(first.clone());
+        }
+    }
+
+    // Single-instance mode: first instance serves IPC; later ones forward and exit.
+    let mut single_server = None;
+    if cfg.single_instance {
+        if let Some(srv) = single_instance::start_first_instance() {
+            single_server = Some(srv);
+        } else if single_instance::forward_to_running(raw_path.as_deref()) {
+            return;
+        }
+        // Forwarding failed (stale discovery): fall through and open our own window.
+    }
+
+    let mut app_state = App::new(cfg.clone(), working_dir);
+    if let Some(srv) = single_server {
+        app_state.set_single_server(srv);
+    }
 
     let mut win_opts = WindowOptions::new("amux - Terminal Multiplexer")
         .with_initial_inner_size(LogicalSize::new(cfg.window.width, cfg.window.height))

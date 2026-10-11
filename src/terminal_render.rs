@@ -6,15 +6,43 @@
 
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::{RgbColor, Underline};
+use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use xilem::masonry::core::render_text;
 use xilem::masonry::imaging::{Painter, record::Scene};
 use xilem::masonry::kurbo::{Affine, Rect, Size};
-use xilem::masonry::parley::style::{FontFamily, FontFamilyName, GenericFamily, StyleProperty};
+use xilem::masonry::parley::style::{FontFamily, StyleProperty};
+use xilem::masonry::parley::FontContext;
 
 use xilem::masonry::peniko::{Brush, Color};
 
 use crate::terminal::Terminal;
+
+/// Font fallback chain for terminal glyphs. Cascadia Mono (ships with Windows
+/// Terminal) covers box-drawing, block elements, braille and check marks that
+/// the generic monospace fallback (Consolas) lacks; the bundled Symbols Nerd
+/// Font Mono supplies powerline/Nerd icons (U+E0B0.., U+F0..); Segoe UI
+/// Symbol catches remaining dingbats; CJK resolves via system fallback.
+pub fn term_font_family() -> FontFamily<'static> {
+    FontFamily::Source(Cow::Borrowed(
+        "Cascadia Mono, Consolas, Symbols Nerd Font Mono, Segoe UI Symbol, monospace",
+    ))
+}
+
+static SYMBOL_FONT_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Register the bundled Symbols Nerd Font Mono into parley's font collection
+/// once. The collection lives in the app-wide FontContext, so registration
+/// persists across frames.
+pub fn ensure_symbol_font(fcx: &mut FontContext) {
+    if SYMBOL_FONT_REGISTERED.load(Ordering::Relaxed) {
+        return;
+    }
+    const DATA: &[u8] = include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
+    let _ = fcx.collection.register_fonts(DATA.to_vec().into(), None);
+    SYMBOL_FONT_REGISTERED.store(true, Ordering::Relaxed);
+}
 
 /// Catppuccin Mocha color scheme
 mod colors {
@@ -25,8 +53,8 @@ mod colors {
     pub const BLUE:      Color = Color::from_rgba8(0x89, 0xb4, 0xfa, 0xff);
 }
 
-/// Inset between a pane's edge and its text grid. Shared by the renderer,
-/// the grid-resize math and click/selection coordinate mapping.
+/// Bottom inset below the last text row. Top/left/right are flush. Shared by
+/// the renderer, the grid-resize math and click/selection coordinate mapping.
 pub const PANE_MARGIN: f64 = 6.0;
 
 fn rgb_to_color(c: RgbColor) -> Color {
@@ -114,8 +142,8 @@ pub fn render_terminal_with_offset(
     lcx: &mut xilem::masonry::parley::LayoutContext<xilem::masonry::core::BrushIndex>,
 ) {
     const MARGIN: f64 = PANE_MARGIN;
-    // Text sits flush against the left edge (sidebar side); other edges keep MARGIN.
-    const LEFT: f64 = 0.0;
+
+    ensure_symbol_font(fcx);
 
     // Background for this pane
     let rect = Rect::new(offset_x, offset_y, offset_x + size.width, offset_y + size.height);
@@ -129,9 +157,7 @@ pub fn render_terminal_with_offset(
     let (cell_w, latin_line_h) = {
         let probe = "MMMMMMMMMM";
         let mut mb = lcx.ranged_builder(fcx, probe, 1.0, true);
-        mb.push_default(StyleProperty::FontFamily(FontFamily::Single(
-            FontFamilyName::Generic(GenericFamily::Monospace),
-        )));
+        mb.push_default(StyleProperty::FontFamily(term_font_family()));
         mb.push_default(StyleProperty::FontSize(font_size));
         let mut ml = mb.build(probe);
         ml.break_all_lines(None);
@@ -140,9 +166,7 @@ pub fn render_terminal_with_offset(
     let (cell_h, baseline_ascent) = {
         let probe = "MMMMMMMMMM你好"; // Mixed to get the taller metrics
         let mut mb = lcx.ranged_builder(fcx, probe, 1.0, true);
-        mb.push_default(StyleProperty::FontFamily(FontFamily::Single(
-            FontFamilyName::Generic(GenericFamily::Monospace),
-        )));
+        mb.push_default(StyleProperty::FontFamily(term_font_family()));
         mb.push_default(StyleProperty::FontSize(font_size));
         let mut ml = mb.build(probe);
         ml.break_all_lines(None);
@@ -156,7 +180,7 @@ pub fn render_terminal_with_offset(
     // stay contiguous when CJK metrics make cell_h taller than the font line.
     let stretch_ratio = (cell_h / latin_line_h).max(1.0);
 
-    let max_displayable_rows = ((size.height - 2.0 * MARGIN).max(0.0) / cell_h).floor() as usize;
+    let max_displayable_rows = ((size.height - MARGIN).max(0.0) / cell_h).floor() as usize;
 
     // Grab the engine (UI thread owns it). Read scrollbar state before the
     // snapshot keeps the render state borrowed. Rebind to a plain `&mut Engine`
@@ -200,7 +224,7 @@ pub fn render_terminal_with_offset(
         if row_idx >= display_lines {
             break;
         }
-        let y = offset_y + MARGIN + row_idx as f64 * cell_h;
+        let y = offset_y + row_idx as f64 * cell_h;
         let bg_row_y = y;
 
         let row_sel = row.selection().ok().flatten();
@@ -265,7 +289,7 @@ pub fn render_terminal_with_offset(
             if cell.is_spacer || cell.selected || cell.bg.is_none() {
                 continue;
             }
-            let bx = offset_x + LEFT + cell.x as f64 * cell_w;
+            let bx = offset_x + cell.x as f64 * cell_w;
             let w = if cell.wide { cell_w * 2.0 } else { cell_w };
             let bg_color = cell.bg.unwrap();
             let cell_rect = Rect::new(bx, bg_row_y, bx + w, bg_row_y + cell_h);
@@ -277,8 +301,8 @@ pub fn render_terminal_with_offset(
             if let Some(sel) = row_sel {
                 let start = (sel.start_x as usize).min(cols - 1);
                 let end = (sel.end_x as usize).min(cols - 1);
-                let bx = offset_x + LEFT + start as f64 * cell_w;
-                let ex = offset_x + LEFT + (end + 1) as f64 * cell_w;
+                let bx = offset_x + start as f64 * cell_w;
+                let ex = offset_x + (end + 1) as f64 * cell_w;
                 let sel_rect = Rect::new(bx, bg_row_y, ex, bg_row_y + cell_h);
                 painter.fill(&sel_rect, colors::BLUE).draw();
             }
@@ -289,7 +313,7 @@ pub fn render_terminal_with_offset(
             if cell.is_spacer || (!cell.underline && !cell.strikethrough) {
                 continue;
             }
-            let ux = offset_x + LEFT + cell.x as f64 * cell_w;
+            let ux = offset_x + cell.x as f64 * cell_w;
             let w = if cell.wide { cell_w * 2.0 } else { cell_w };
             if cell.underline {
                 let ul_rect = Rect::new(ux, bg_row_y + cell_h - 2.0, ux + w, bg_row_y + cell_h);
@@ -325,7 +349,7 @@ pub fn render_terminal_with_offset(
                     .find(|c| c.x == cx)
                     .map(|c| if c.wide { cell_w * 2.0 } else { cell_w })
                     .unwrap_or(cell_w);
-                let cursor_x = offset_x + LEFT + cx as f64 * cell_w;
+                let cursor_x = offset_x + cx as f64 * cell_w;
                 let cursor_rect = Rect::new(cursor_x, bg_row_y, cursor_x + cursor_w, bg_row_y + cell_h);
                 painter.fill(&cursor_rect, cursor_brush).draw();
             }
@@ -345,13 +369,11 @@ pub fn render_terminal_with_offset(
             } else {
                 cell.fg
             };
-            let x = offset_x + LEFT + cell.x as f64 * cell_w;
+            let x = offset_x + cell.x as f64 * cell_w;
 
             let s = &cell.text;
             let mut builder = lcx.ranged_builder(fcx, s, 1.0, true);
-            builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
-                FontFamilyName::Generic(GenericFamily::Monospace),
-            )));
+            builder.push_default(StyleProperty::FontFamily(term_font_family()));
             builder.push_default(StyleProperty::FontSize(font_size));
 
             let stretch = stretch_ratio > 1.005 && is_cell_filler(s);
@@ -382,14 +404,14 @@ pub fn render_terminal_with_offset(
     // Scrollbar — only shown when there is scrollback beyond the viewport.
     if sb_total > sb_len {
         let track_width = 8.0;
-        let track_x = offset_x + size.width - track_width - MARGIN;
-        let track_rect = Rect::new(track_x, offset_y + MARGIN, track_x + track_width, offset_y + size.height - MARGIN);
+        let track_x = offset_x + size.width - track_width;
+        let track_rect = Rect::new(track_x, offset_y, track_x + track_width, offset_y + size.height - MARGIN);
         // Track background (semi-transparent)
         painter.fill(&track_rect, Color::from_rgba8(0x18, 0x18, 0x25, 0x80)).draw();
 
         // Thumb — size proportional to viewport/total, position from engine scrollbar offset
         {
-            let scrollable_h = size.height - 2.0 * MARGIN;
+            let scrollable_h = size.height - MARGIN;
             let viewport_ratio = (sb_len as f64 / sb_total as f64).min(1.0);
             let thumb_h = (scrollable_h * viewport_ratio).max(20.0);
 
@@ -399,7 +421,7 @@ pub fn render_terminal_with_offset(
             } else {
                 0.0
             };
-            let thumb_y = offset_y + MARGIN + (scrollable_h - thumb_h) * scroll_progress;
+            let thumb_y = offset_y + (scrollable_h - thumb_h) * scroll_progress;
             let thumb_rect = Rect::new(track_x + 1.0, thumb_y, track_x + track_width - 1.0, thumb_y + thumb_h);
             painter.fill(&thumb_rect, colors::SURFACE1).draw();
         }

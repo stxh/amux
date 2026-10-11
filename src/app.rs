@@ -1,5 +1,4 @@
 use crate::config::Config;
-use crate::terminal_render::PANE_MARGIN;
 use crate::group::TerminalGroup;
 use crate::pane::Pane;
 use crate::pane_tree::{PaneId, SplitDirection};
@@ -67,6 +66,8 @@ pub struct App {
     click_count: usize,
     /// Button held during a mouse-reporting drag (adapter btn_id), for motion reports
     mouse_down_btn: Option<u8>,
+    /// Single-instance IPC server (first instance only)
+    pub single_server: Option<std::sync::Arc<crate::single_instance::ServerState>>,
 }
 
 impl AppState for App {
@@ -76,8 +77,9 @@ impl AppState for App {
 }
 
 impl App {
-    pub fn new(cfg: Config) -> Self {
-        let config = TerminalConfig::default();
+    pub fn new(cfg: Config, working_dir: Option<std::path::PathBuf>) -> Self {
+        let mut config = TerminalConfig::default();
+        config.working_dir = working_dir;
 
         // Create first group with one tab and one pane
         let group = TerminalGroup::new(1, 1, 1, &config);
@@ -112,6 +114,41 @@ impl App {
             last_click_pane_id: 0,
             click_count: 0,
             mouse_down_btn: None,
+            single_server: None,
+        }
+    }
+
+    pub fn set_single_server(&mut self, server: std::sync::Arc<crate::single_instance::ServerState>) {
+        if let Some(proxy) = &self.redraw_proxy {
+            server.set_proxy(proxy.clone());
+        }
+        self.single_server = Some(server);
+    }
+
+    /// Handle queued single-instance requests: open tabs and raise the window.
+    pub fn poll_single_instance(&mut self) {
+        let Some(server) = self.single_server.clone() else {
+            return;
+        };
+        let (paths, activate) = server.take_requests();
+        let any_paths = !paths.is_empty();
+        for path in paths {
+            let pb = std::path::PathBuf::from(&path);
+            if !pb.is_dir() {
+                self.status_message = format!("Not a directory: {}", path);
+                continue;
+            }
+            self.add_tab_with_cwd(Some(pb));
+            self.status_message = format!("Opened tab at {}", path);
+        }
+        if activate || any_paths {
+            crate::win_util::bring_to_front();
+        }
+    }
+
+    pub fn shutdown_single(&self) {
+        if let Some(server) = &self.single_server {
+            server.shutdown();
         }
     }
 
@@ -119,6 +156,9 @@ impl App {
     pub fn register_redraw_proxy(&mut self, proxy: xilem::core::MessageProxy<()>) {
         // println!("DEBUG: Registering redraw_proxy on App!");
         self.redraw_proxy = Some(proxy.clone());
+        if let Some(server) = &self.single_server {
+            server.set_proxy(proxy.clone());
+        }
         
         // Propagate to all existing terminals in all groups & tabs
         for group in &mut self.groups {
@@ -245,12 +285,23 @@ impl App {
 
     /// Add a new tab to the active group
     pub fn add_tab(&mut self) {
+        let config = self.terminal_config.clone();
+        self.add_tab_with_config(config);
+    }
+
+    /// Add a new tab whose shells start in `cwd` (single-instance `amux <path>`).
+    pub fn add_tab_with_cwd(&mut self, cwd: Option<std::path::PathBuf>) {
+        let mut config = self.terminal_config.clone();
+        config.working_dir = cwd;
+        self.add_tab_with_config(config);
+    }
+
+    fn add_tab_with_config(&mut self, config: crate::terminal::TerminalConfig) {
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
 
-        let config = self.terminal_config.clone();
         let proxy = self.redraw_proxy.clone(); // Clone first to avoid borrow conflicts
         if let Some(group) = self.active_group_mut() {
             group.add_tab(tab_id, pane_id, &config);
@@ -456,14 +507,30 @@ impl App {
     /// Cascades to tab/group removal; quitting the app when the last one closes.
     pub fn reap_exited_panes(&mut self) {
         let mut exited: Vec<(usize, usize, PaneId)> = Vec::new();
+        let mut aborted: Vec<(usize, usize, PaneId, u32)> = Vec::new();
         for (gi, group) in self.groups.iter().enumerate() {
             for (ti, tab) in group.tabs.iter().enumerate() {
                 tab.pane_tree.for_each(&mut |pane, _| {
                     if pane.terminal.shell_exited() {
                         exited.push((gi, ti, pane.id));
+                    } else if let Some(code) = pane.terminal.take_shell_abort() {
+                        aborted.push((gi, ti, pane.id, code));
                     }
                 });
             }
+        }
+        if aborted.is_empty() && exited.is_empty() {
+            return;
+        }
+        // Abnormal shell exit (e.g. killed by a child TUI such as opencode's
+        // parent-kill bug): keep the pane, print a notice instead of closing.
+        for (gi, ti, pane_id, code) in aborted {
+            if let Some((pane, _)) = self.groups[gi].tabs[ti].pane_tree.find(pane_id) {
+                pane.terminal.print_notice(&format!(
+                    "[amux] shell terminated abnormally (code {code}); pane stays open, close with Ctrl+B x"));
+            }
+            self.status_message = format!("Shell exited abnormally (code {code})");
+            self.redraw_counter += 1;
         }
         if exited.is_empty() {
             return;
@@ -638,9 +705,9 @@ impl App {
                         let cols = pane.terminal.grid_cols();
                         let rows = pane.terminal.grid_rows();
 
-                        let col = (((px - rect.x - PANE_MARGIN) / self.cell_w).floor().max(0.0) as usize)
+                        let col = (((px - rect.x) / self.cell_w).floor().max(0.0) as usize)
                             .min(cols.saturating_sub(1));
-                        let row = (((py - rect.y - PANE_MARGIN) / self.cell_h).floor().max(0.0) as usize)
+                        let row = (((py - rect.y) / self.cell_h).floor().max(0.0) as usize)
                             .min(rows.saturating_sub(1));
 
                         if button == xilem::masonry::core::PointerButton::Primary {
@@ -685,8 +752,8 @@ impl App {
             if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
                 if let Some((pane, _)) = tab.pane_tree.find_mut(pane_id) {
                     if pane.terminal.mouse_is_reporting() {
-                        let gx = (px - rect.x - PANE_MARGIN).max(0.0) as f32;
-                        let gy = (py - rect.y - PANE_MARGIN).max(0.0) as f32;
+                        let gx = (px - rect.x).max(0.0) as f32;
+                        let gy = (py - rect.y).max(0.0) as f32;
                         pane.terminal.mouse_report(btn_id, 0, true, gx, gy, shift, alt, ctrl);
                         self.mouse_down_btn = Some(btn_id);
                         self.redraw_counter += 1;
@@ -730,9 +797,9 @@ impl App {
                     let cols = pane.terminal.grid_cols();
                     let rows = pane.terminal.grid_rows();
 
-                    let col = (((px - active_rect.x - PANE_MARGIN) / self.cell_w).floor().max(0.0) as usize)
+                    let col = (((px - active_rect.x) / self.cell_w).floor().max(0.0) as usize)
                         .min(cols.saturating_sub(1));
-                    let row = (((py - active_rect.y - PANE_MARGIN) / self.cell_h).floor().max(0.0) as usize)
+                    let row = (((py - active_rect.y) / self.cell_h).floor().max(0.0) as usize)
                         .min(rows.saturating_sub(1));
 
                     pane.terminal.update_selection(row as i32, col);
@@ -789,8 +856,8 @@ impl App {
                         if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
                             if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
                                 if pane.terminal.mouse_is_reporting() {
-                                    let gx = (px - rect.x - PANE_MARGIN).max(0.0) as f32;
-                                    let gy = (py - rect.y - PANE_MARGIN).max(0.0) as f32;
+                                    let gx = (px - rect.x).max(0.0) as f32;
+                                    let gy = (py - rect.y).max(0.0) as f32;
                                     let btn = if delta_lines > 0 { 3 } else { 4 };
                                     pane.terminal.mouse_report(btn, 0, false, gx, gy, shift, alt, ctrl);
                                     self.redraw_counter += 1;
@@ -830,8 +897,8 @@ impl App {
             if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
                 if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
                     if pane.terminal.mouse_is_reporting() {
-                        let gx = (px - rect.x - PANE_MARGIN).max(0.0) as f32;
-                        let gy = (py - rect.y - PANE_MARGIN).max(0.0) as f32;
+                        let gx = (px - rect.x).max(0.0) as f32;
+                        let gy = (py - rect.y).max(0.0) as f32;
                         pane.terminal.mouse_report(btn, 2, true, gx, gy, shift, alt, ctrl);
                         self.redraw_counter += 1;
                         return true;
@@ -871,8 +938,8 @@ impl App {
             if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
                 if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
                     if pane.terminal.mouse_is_reporting() {
-                        let gx = (px - rect.x - PANE_MARGIN).max(0.0) as f32;
-                        let gy = (py - rect.y - PANE_MARGIN).max(0.0) as f32;
+                        let gx = (px - rect.x).max(0.0) as f32;
+                        let gy = (py - rect.y).max(0.0) as f32;
                         pane.terminal.mouse_report(btn_id, 1, false, gx, gy, shift, alt, ctrl);
                         self.redraw_counter += 1;
                         return true;

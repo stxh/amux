@@ -34,19 +34,18 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
 
         // 获取文本渲染上下文
         let (fcx, lcx) = ctx.text_contexts();
+        crate::terminal_render::ensure_symbol_font(fcx);
 
         // Dynamically measure monospace cell dimensions from font metrics.
         // Use a mixed Latin+CJK probe for cell_h so CJK fallback fonts
         // (e.g. PingFang on macOS) with taller metrics are accommodated,
         // preventing Chinese glyph overflow in selection highlighting.
         let font_size = state.font_size as f32;
-        use xilem::masonry::parley::style::{StyleProperty, FontFamily, FontFamilyName, GenericFamily};
+        use xilem::masonry::parley::style::StyleProperty;
         let cell_w = {
             let probe = "MMMMMMMMMM";
             let mut mb = lcx.ranged_builder(fcx, probe, 1.0, true);
-            mb.push_default(StyleProperty::FontFamily(FontFamily::Single(
-                FontFamilyName::Generic(GenericFamily::Monospace),
-            )));
+            mb.push_default(StyleProperty::FontFamily(crate::terminal_render::term_font_family()));
             mb.push_default(StyleProperty::FontSize(font_size));
             let mut ml = mb.build(probe);
             ml.break_all_lines(None);
@@ -55,9 +54,7 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
         let cell_h = {
             let probe = "MMMMMMMMMM你好";
             let mut mb = lcx.ranged_builder(fcx, probe, 1.0, true);
-            mb.push_default(StyleProperty::FontFamily(FontFamily::Single(
-                FontFamilyName::Generic(GenericFamily::Monospace),
-            )));
+            mb.push_default(StyleProperty::FontFamily(crate::terminal_render::term_font_family()));
             mb.push_default(StyleProperty::FontSize(font_size));
             let mut ml = mb.build(probe);
             ml.break_all_lines(None);
@@ -79,8 +76,8 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
 
         for (pane_id, rect) in &layouts {
             if available_size.width > 0.0 && available_size.height > 0.0 {
-                let new_cols = ((rect.width - MARGIN).max(0.0) / cell_w).floor() as u16;
-                let new_rows = ((rect.height - 2.0 * MARGIN).max(0.0) / cell_h).floor() as u16;
+                let new_cols = (rect.width.max(0.0) / cell_w).floor() as u16;
+                let new_rows = ((rect.height - MARGIN).max(0.0) / cell_h).floor() as u16;
                 let new_cols = new_cols.max(2);
                 let new_rows = new_rows.max(2);
 
