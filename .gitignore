@@ -33,3 +33,9 @@ vendor/ghostty-*
 /tools/
 shot*.png
 clip.txt
+
+# Local agent/tool state (never commit)
+.mimocode/
+.nezha/
+.qoder/
+data/
