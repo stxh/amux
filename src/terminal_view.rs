@@ -9,12 +9,48 @@ use xilem::view::canvas;
 use xilem::WidgetView;
 use xilem::masonry::peniko::Color;
 
+/// Frame-time probe, enabled with `AMUX_FRAME_LOG=1`.
+///
+/// Recording the scene is the expensive half of a frame, so knowing how long it
+/// takes is the difference between guessing and knowing whether scrolling is
+/// GPU-bound or CPU-bound. Reports every 120 frames.
+pub fn terminal_view_frame_log(elapsed: std::time::Duration) {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static ENABLED: AtomicU8 = AtomicU8::new(0);
+    if ENABLED.load(Ordering::Relaxed) == 0 {
+        let on = std::env::var_os("AMUX_FRAME_LOG").is_some() as u8 + 1;
+        ENABLED.store(on, Ordering::Relaxed);
+    }
+    if ENABLED.load(Ordering::Relaxed) != 2 {
+        return;
+    }
+    thread_local! {
+        static STATS: Cell<(u64, u128, u128)> = const { Cell::new((0, 0, 0)) };
+    }
+    STATS.with(|stats| {
+        let us = elapsed.as_micros();
+        let (frames, total, max) = stats.get();
+        let (frames, total, max) = (frames + 1, total + us, max.max(us));
+        stats.set((frames, total, max));
+        if frames >= 120 {
+            eprintln!(
+                "[amux frame] n={frames} avg={:.2}ms max={:.2}ms",
+                total as f64 / 1000.0 / frames as f64,
+                max as f64 / 1000.0
+            );
+            stats.set((0, 0, 0));
+        }
+    });
+}
+
 /// 创建终端 canvas 视图（不包含键盘捕获层）
 /// 键盘捕获的 text_input 在 main.rs 的布局中单独添加
 pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<> {
     canvas(move |state: &mut App, ctx, scene, available_size| {
         // Capture redraw_counter to force closure state change and widget rebuild
         let _ = redraw_counter;
+        let frame_start = std::time::Instant::now();
         // Track window size for config saving
         state.window_size = (available_size.width, available_size.height);
         use xilem::masonry::imaging::Painter;
@@ -71,6 +107,8 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
 
         // 收集需要 resize 的 pane（先收集，避免借用冲突）
         let mut pending: Vec<(usize, u16, u16)> = Vec::new();
+        // 本帧各 pane 的滚动条几何（供鼠标命中测试与拖动使用）
+        let mut scrollbars: Vec<crate::terminal_render::ScrollbarGeometry> = Vec::new();
 
         const MARGIN: f64 = crate::terminal_render::PANE_MARGIN;
 
@@ -94,7 +132,7 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
                 let pane_size = xilem::masonry::kurbo::Size::new(rect.width, rect.height);
                 let is_active = *pane_id == active_pane_id;
 
-                crate::terminal_render::render_terminal_with_offset(
+                if let Some(scrollbar) = crate::terminal_render::render_terminal_with_offset(
                     &mut painter,
                     &pane.terminal,
                     pane_state,
@@ -105,7 +143,10 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
                     font_size,
                     fcx,
                     lcx,
-                );
+                    *pane_id,
+                ) {
+                    scrollbars.push(scrollbar);
+                }
 
                 // Draw floating close button overlay on hover (only if split pane count > 1)
                 let pane_count = layouts.len();
@@ -144,7 +185,22 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
             }
         }
 
+        // 系统设置面板（模态，绘制在最上层）
+        if state.show_settings {
+            crate::terminal_render::render_settings_overlay(
+                &mut painter,
+                state,
+                xilem::masonry::kurbo::Size::new(available_size.width, available_size.height),
+                fcx,
+                lcx,
+            );
+        }
+
         // 把 resize 请求加入队列
         state.pending_resizes.extend(pending);
+        // 缓存滚动条几何，供鼠标命中测试与拖动使用
+        state.scrollbars = scrollbars;
+
+        terminal_view_frame_log(frame_start.elapsed());
     }).alt_text("Terminal multiplexer output")
 }

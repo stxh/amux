@@ -14,7 +14,6 @@ const GROUP_ICONS: &[&str] = &[
 
 /// A terminal group containing multiple tabs
 pub struct TerminalGroup {
-    pub id: usize,
     /// Auto-assigned icon
     pub icon: String,
     /// Group name (auto-generated)
@@ -27,17 +26,11 @@ pub struct TerminalGroup {
 
 impl TerminalGroup {
     /// Create a new group with one initial tab
-    pub fn new(
-        group_id: usize,
-        initial_tab_id: usize,
-        initial_pane_id: PaneId,
-        config: &TerminalConfig,
-    ) -> Self {
+    pub fn new(group_id: usize, initial_pane_id: PaneId, config: &TerminalConfig) -> Self {
         let icon_idx = (group_id - 1) % GROUP_ICONS.len();
-        let tab = Tab::new(initial_tab_id, initial_pane_id, config);
+        let tab = Tab::new(initial_pane_id, config);
 
         Self {
-            id: group_id,
             icon: GROUP_ICONS[icon_idx].to_string(),
             name: format!("Group {}", group_id),
             tabs: vec![tab],
@@ -56,23 +49,10 @@ impl TerminalGroup {
     }
 
     /// Add a new tab to this group
-    pub fn add_tab(&mut self, tab_id: usize, pane_id: PaneId, config: &TerminalConfig) {
-        let tab = Tab::new(tab_id, pane_id, config);
+    pub fn add_tab(&mut self, pane_id: PaneId, config: &TerminalConfig) {
+        let tab = Tab::new(pane_id, config);
         self.tabs.push(tab);
         self.active_tab_index = self.tabs.len() - 1;
-    }
-
-    /// Remove the active tab. Returns false if it's the last tab.
-    pub fn remove_active_tab(&mut self) -> bool {
-        if self.tabs.len() <= 1 {
-            return false;
-        }
-
-        self.tabs.remove(self.active_tab_index);
-        if self.active_tab_index >= self.tabs.len() {
-            self.active_tab_index = self.tabs.len() - 1;
-        }
-        true
     }
 
     /// Switch to a specific tab by index

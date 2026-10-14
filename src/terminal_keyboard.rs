@@ -68,6 +68,8 @@ pub enum TerminalAction {
     },
     /// IME committed text (e.g., from CJK input method)
     TextCommit(String),
+    /// The pointer interaction was aborted (capture lost, window unfocused, …)
+    Cancel,
 }
 
 /// Extract shift/alt/ctrl booleans from a masonry Modifiers bitset.
@@ -114,6 +116,11 @@ impl Widget for TerminalKeyboardWidget {
         match event {
             PointerEvent::Down(pointer_event) => {
                 ctx.request_focus();
+                // Take masonry's pointer capture so moves and the release keep
+                // reaching this widget even when the cursor leaves its box.
+                if pointer_event.button == Some(xilem::masonry::core::PointerButton::Primary) {
+                    ctx.capture_pointer();
+                }
                 let physical = pointer_event.state.position;
                 let pos = ctx.local_position(physical);
                 let x = pos.x;
@@ -130,20 +137,22 @@ impl Widget for TerminalKeyboardWidget {
                 }
             }
             PointerEvent::Up(pointer_event) => {
+                self.is_left_down = false;
                 let physical = pointer_event.state.position;
                 let pos = ctx.local_position(physical);
                 let x = pos.x;
                 let y = pos.y;
                 let button = pointer_event.button;
                 let (shift, alt, ctrl) = mods_split(&pointer_event.state.modifiers);
-                if button == Some(xilem::masonry::core::PointerButton::Primary) {
-                    self.is_left_down = false;
-                }
                 if let Some(btn) = button {
                     ctx.submit_action::<TerminalAction>(TerminalAction::MouseUp {
                         x, y, button: btn, shift, alt, ctrl,
                     });
                 }
+            }
+            PointerEvent::Cancel(_) => {
+                self.is_left_down = false;
+                ctx.submit_action::<TerminalAction>(TerminalAction::Cancel);
             }
             PointerEvent::Move(pointer_event) => {
                 ctx.request_focus();
@@ -438,13 +447,6 @@ impl FocuslessButtonWidget {
             child: child.erased().to_pod(),
         }
     }
-    
-    pub fn set_child(this: &mut WidgetMut<'_, Self>, child: NewWidget<impl Widget + ?Sized>) {
-        this.ctx.remove_child(std::mem::replace(
-            &mut this.widget.child,
-            child.erased().to_pod(),
-        ));
-    }
 
     pub fn child_mut<'t>(this: &'t mut WidgetMut<'_, Self>) -> WidgetMut<'t, dyn Widget> {
         this.ctx.get_mut(&mut this.widget.child)
@@ -700,124 +702,3 @@ where
     }
 }
 
-// ─── DragArea Widget & View ───
-
-pub struct DragAreaWidget;
-
-impl Widget for DragAreaWidget {
-    type Action = ();
-
-    fn accepts_focus(&self) -> bool {
-        false
-    }
-
-    fn accepts_text_input(&self) -> bool {
-        false
-    }
-
-    fn on_pointer_event(
-        &mut self,
-        _ctx: &mut EventCtx<'_>,
-        _props: &mut PropertiesMut<'_>,
-        event: &PointerEvent,
-    ) {
-        if let PointerEvent::Down(..) = event {
-            // println!("DEBUG: DragAreaWidget clicked, dragging window");
-            crate::win_util::drag_active_window();
-        }
-    }
-
-    fn on_text_event(
-        &mut self,
-        _ctx: &mut EventCtx<'_>,
-        _props: &mut PropertiesMut<'_>,
-        _event: &TextEvent,
-    ) {}
-
-    fn register_children(&mut self, _ctx: &mut RegisterCtx<'_>) {}
-
-    fn measure(
-        &mut self,
-        _ctx: &mut MeasureCtx<'_>,
-        _props: &PropertiesRef<'_>,
-        _axis: Axis,
-        len_req: LenReq,
-        _cross_length: Option<f64>,
-    ) -> f64 {
-        match len_req {
-            LenReq::MinContent | LenReq::MaxContent => 0.0,
-            LenReq::FitContent(space) => space,
-        }
-    }
-
-    fn layout(&mut self, _ctx: &mut LayoutCtx<'_>, _props: &PropertiesRef<'_>, _size: Size) {}
-
-    fn paint(
-        &mut self,
-        _ctx: &mut PaintCtx<'_>,
-        _props: &PropertiesRef<'_>,
-        _painter: &mut Painter<'_>,
-    ) {}
-
-    fn accessibility_role(&self) -> Role {
-        Role::Unknown
-    }
-
-    fn accessibility(
-        &mut self,
-        _ctx: &mut AccessCtx<'_>,
-        _props: &PropertiesRef<'_>,
-        _node: &mut Node,
-    ) {}
-
-    fn children_ids(&self) -> ChildrenIds {
-        ChildrenIds::new()
-    }
-}
-
-pub struct DragArea;
-
-impl xilem::core::ViewMarker for DragArea {}
-
-impl<State: 'static, Action> xilem::core::View<State, Action, xilem::ViewCtx> for DragArea {
-    type Element = xilem::Pod<DragAreaWidget>;
-    type ViewState = ();
-
-    fn build(&self, ctx: &mut xilem::ViewCtx, _state: &mut State) -> (Self::Element, Self::ViewState) {
-        let widget = DragAreaWidget;
-        let pod = ctx.create_pod(widget);
-        (pod, ())
-    }
-
-    fn rebuild(
-        &self,
-        _prev: &Self,
-        _view_state: &mut Self::ViewState,
-        _ctx: &mut xilem::ViewCtx,
-        _element: xilem::core::Mut<'_, Self::Element>,
-        _app_state: &mut State,
-    ) {}
-
-    fn teardown(
-        &self,
-        _view_state: &mut Self::ViewState,
-        _ctx: &mut xilem::ViewCtx,
-        _element: xilem::core::Mut<'_, Self::Element>,
-    ) {
-        // No teardown needed
-    }
-
-    fn message(
-        &self,
-        _view_state: &mut Self::ViewState,
-        _message: &mut xilem::core::MessageCtx,
-        _element: xilem::core::Mut<'_, Self::Element>,
-        _app_state: &mut State,
-    ) -> xilem::core::MessageResult<Action> {
-        xilem::core::MessageResult::Nop
-    }
-}
-
-pub fn drag_area() -> DragArea {
-    DragArea
-}

@@ -503,12 +503,16 @@ impl Terminal {
         engine.term.scroll_viewport(ScrollViewport::Bottom);
     }
 
-    /// Get cursor position (x, y) in active-area coordinates
-    pub fn cursor(&self) -> (u16, u16) {
+    /// Scrollbar state: (total rows, viewport offset, visible rows).
+    ///
+    /// `offset` grows as the viewport scrolls up into history. Used to map
+    /// scrollbar drags onto scroll positions.
+    pub fn scrollbar_state(&self) -> (usize, usize, usize) {
         let engine = self.engine.borrow();
-        let x = engine.term.cursor_x().unwrap_or(0);
-        let y = engine.term.cursor_y().unwrap_or(0);
-        (x, y)
+        match engine.term.scrollbar() {
+            Ok(s) => (s.total as usize, s.offset as usize, s.len as usize),
+            Err(_) => (0, 0, 0),
+        }
     }
 
     fn viewport_point(&self, line: i32, col: usize) -> Point {
@@ -518,9 +522,24 @@ impl Terminal {
         })
     }
 
+    /// Anchor point in screen space, where row 0 is the top of the scrollback.
+    ///
+    /// Viewport coordinates describe a *visible* row, so an anchor kept in that
+    /// space drifts with the content while scrolling (the selection then slides
+    /// instead of growing). Screen space is stable, which is what a selection
+    /// anchor needs during scrolling and edge auto-scroll.
+    fn screen_point(&self, line: i32, col: usize) -> Point {
+        let engine = self.engine.borrow();
+        let offset = engine.term.scrollbar().map(|s| s.offset).unwrap_or(0) as u32;
+        Point::Screen(PointCoordinate {
+            x: col as u16,
+            y: offset.saturating_add(line.max(0) as u32),
+        })
+    }
+
     /// Start a new character-based selection at the given viewport position
     pub fn start_selection(&mut self, line: i32, col: usize) {
-        let anchor = self.viewport_point(line, col);
+        let anchor = self.screen_point(line, col);
         self.sel_anchor = Some(anchor);
         let engine = self.engine.borrow();
         if let (Ok(a), Ok(b)) = (engine.term.grid_ref(anchor), engine.term.grid_ref(anchor)) {
@@ -531,7 +550,7 @@ impl Terminal {
 
     /// Start a word selection (double-click) at the given viewport position
     pub fn start_word_selection(&mut self, line: i32, col: usize) {
-        let anchor = self.viewport_point(line, col);
+        let anchor = self.screen_point(line, col);
         self.sel_anchor = Some(anchor);
         let engine = self.engine.borrow();
         if let Ok(grid_ref) = engine.term.grid_ref(anchor) {
@@ -548,7 +567,7 @@ impl Terminal {
 
     /// Start a line selection (triple-click) at the given viewport position
     pub fn start_line_selection(&mut self, line: i32, col: usize) {
-        let anchor = self.viewport_point(line, col);
+        let anchor = self.screen_point(line, col);
         self.sel_anchor = Some(anchor);
         let engine = self.engine.borrow();
         if let Ok(grid_ref) = engine.term.grid_ref(anchor) {

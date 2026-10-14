@@ -14,16 +14,12 @@ pub struct App {
     pub active_group_index: usize,
     /// Global ID counter for panes
     pub next_pane_id: PaneId,
-    /// Global ID counter for tabs
-    pub next_tab_id: usize,
     /// Global ID counter for groups
     pub next_group_id: usize,
     /// Terminal configuration
     pub terminal_config: TerminalConfig,
     /// Whether we're in prefix mode (waiting for a command after Ctrl+B)
     pub prefix_mode: bool,
-    /// Prefix mode indicator for UI
-    pub prefix_indicator: String,
     /// Status message
     pub status_message: String,
     /// Keep running flag
@@ -68,6 +64,49 @@ pub struct App {
     mouse_down_btn: Option<u8>,
     /// Single-instance IPC server (first instance only)
     pub single_server: Option<std::sync::Arc<crate::single_instance::ServerState>>,
+    /// Whether the system settings overlay is open
+    pub show_settings: bool,
+    /// Hit rects of the settings overlay controls (rebuilt on every frame)
+    pub settings_items: Vec<(crate::terminal_render::SettingsAction, crate::pane_tree::Rect)>,
+    /// Bounds of the settings overlay panel (None while closed)
+    pub settings_panel: Option<crate::pane_tree::Rect>,
+    /// Scrollbars of every pane for the current frame (hit testing)
+    pub scrollbars: Vec<crate::terminal_render::ScrollbarGeometry>,
+    /// Active scrollbar thumb drag: pane plus pointer-to-thumb-centre offset
+    scrollbar_drag: Option<ScrollbarDrag>,
+    /// Edge auto-scroll while a selection drag holds the pointer outside a pane
+    auto_scroll: Option<AutoScroll>,
+    /// Mirrors `auto_scroll.is_some()` so the UI timer only wakes the loop
+    /// when scrolling is actually needed.
+    pub auto_scroll_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// In-flight scrollbar drag.
+///
+/// The geometry is snapshotted at grab time: the engine's `scrollbar()` call is
+/// expensive for pinned viewports, so re-reading it on every mouse move would
+/// make the drag stutter.
+#[derive(Clone, Copy)]
+struct ScrollbarDrag {
+    pane_id: PaneId,
+    /// Pointer y (client space) when the drag started.
+    start_y: f64,
+    /// Thumb travel available, in pixels.
+    movable: f64,
+    /// Scrollable rows above the viewport.
+    max_scroll: f64,
+    /// Engine offset when the drag started (0 = oldest row).
+    base_offset: f64,
+    /// Last target handed to the engine; keeps sub-row steps from being lost.
+    applied: f64,
+}
+
+/// Edge auto-scroll driven by a selection drag past a pane's row bounds.
+#[derive(Clone, Copy)]
+struct AutoScroll {
+    pane_id: PaneId,
+    /// Rows per tick; positive scrolls into history, like `scroll_viewport`.
+    step: i32,
 }
 
 impl AppState for App {
@@ -82,17 +121,15 @@ impl App {
         config.working_dir = working_dir;
 
         // Create first group with one tab and one pane
-        let group = TerminalGroup::new(1, 1, 1, &config);
+        let group = TerminalGroup::new(1, 1, &config);
 
         Self {
             groups: vec![group],
             active_group_index: 0,
             next_pane_id: 2,   // pane 1 already used
-            next_tab_id: 2,    // tab 1 already used
             next_group_id: 2,  // group 1 already used
             terminal_config: config,
             prefix_mode: false,
-            prefix_indicator: String::new(),
             status_message: "Ready - Shortcuts active".to_string(),
             running: true,
             redraw_counter: 0,
@@ -115,6 +152,13 @@ impl App {
             click_count: 0,
             mouse_down_btn: None,
             single_server: None,
+            show_settings: false,
+            settings_items: Vec::new(),
+            settings_panel: None,
+            scrollbars: Vec::new(),
+            scrollbar_drag: None,
+            auto_scroll: None,
+            auto_scroll_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -123,6 +167,80 @@ impl App {
             server.set_proxy(proxy.clone());
         }
         self.single_server = Some(server);
+    }
+
+    /// Wake the event loop so a redraw (or an exit request) is handled promptly.
+    pub fn wake(&self) {
+        if let Some(proxy) = &self.redraw_proxy {
+            let _ = proxy.message(());
+        }
+    }
+
+    // ─── System settings overlay ───
+
+    /// Open or close the settings overlay (the gear button, Ctrl+, Esc).
+    pub fn toggle_settings(&mut self) {
+        self.show_settings = !self.show_settings;
+        self.status_message = if self.show_settings {
+            "Settings".to_string()
+        } else {
+            "Settings closed".to_string()
+        };
+        self.redraw_counter += 1;
+        self.wake();
+    }
+
+    /// Close the settings overlay if it is open.
+    pub fn close_settings(&mut self) {
+        if self.show_settings {
+            self.show_settings = false;
+            self.redraw_counter += 1;
+            self.wake();
+        }
+    }
+
+    /// Apply a control of the settings overlay.
+    pub fn apply_settings_action(&mut self, action: crate::terminal_render::SettingsAction) {
+        use crate::terminal_render::SettingsAction;
+        match action {
+            SettingsAction::FontMinus => {
+                self.font_size = (self.font_size - 1.0).max(6.0);
+                self.status_message = format!("Font size: {}", self.font_size.round() as i64);
+            }
+            SettingsAction::FontPlus => {
+                self.font_size = (self.font_size + 1.0).min(72.0);
+                self.status_message = format!("Font size: {}", self.font_size.round() as i64);
+            }
+            SettingsAction::ToggleSidebar => {
+                self.show_sidebar = !self.show_sidebar;
+                self.status_message = format!("Sidebar visibility: {}", self.show_sidebar);
+            }
+            SettingsAction::ToggleRightSidebar => {
+                self.show_right_sidebar = !self.show_right_sidebar;
+                self.status_message = format!("Right sidebar visibility: {}", self.show_right_sidebar);
+            }
+            SettingsAction::ToggleSingleInstance => {
+                self.user_config.single_instance = !self.user_config.single_instance;
+                self.status_message = format!("Single instance: {}", self.user_config.single_instance);
+            }
+            SettingsAction::OpenConfigDir => {
+                crate::config::open_config_dir();
+                self.status_message = "Opened config directory".to_string();
+            }
+            SettingsAction::Close => {
+                self.close_settings();
+                return;
+            }
+            SettingsAction::Quit => {
+                self.running = false;
+                self.status_message = "Quitting".to_string();
+                self.redraw_counter += 1;
+                self.wake();
+                return;
+            }
+        }
+        self.redraw_counter += 1;
+        self.wake();
     }
 
     /// Handle queued single-instance requests: open tabs and raise the window.
@@ -216,12 +334,10 @@ impl App {
     pub fn add_group(&mut self) {
         let group_id = self.next_group_id;
         self.next_group_id += 1;
-        let tab_id = self.next_tab_id;
-        self.next_tab_id += 1;
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
 
-        let mut group = TerminalGroup::new(group_id, tab_id, pane_id, &self.terminal_config);
+        let mut group = TerminalGroup::new(group_id, pane_id, &self.terminal_config);
         if let Some(proxy) = &self.redraw_proxy {
             for tab in &mut group.tabs {
                 tab.pane_tree.for_each_mut(&mut |pane, _| {
@@ -297,14 +413,12 @@ impl App {
     }
 
     fn add_tab_with_config(&mut self, config: crate::terminal::TerminalConfig) {
-        let tab_id = self.next_tab_id;
-        self.next_tab_id += 1;
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
 
         let proxy = self.redraw_proxy.clone(); // Clone first to avoid borrow conflicts
         if let Some(group) = self.active_group_mut() {
-            group.add_tab(tab_id, pane_id, &config);
+            group.add_tab(pane_id, &config);
             if let Some(p) = proxy {
                 if let Some(tab) = group.tabs.last_mut() {
                     tab.pane_tree.for_each_mut(&mut |pane, _| {
@@ -312,7 +426,8 @@ impl App {
                     });
                 }
             }
-            self.status_message = format!("New tab {} ({} tabs)", tab_id, self.groups[self.active_group_index].tab_count());
+            let tab_count = self.groups[self.active_group_index].tab_count();
+            self.status_message = format!("New tab ({} tabs)", tab_count);
         }
     }
 
@@ -476,16 +591,6 @@ impl App {
         // println!("DEBUG: App::handle_raw_key_event: {}", info);
         self.last_key_info = info;
         crate::keyboard::handle_key_input(self, key, ctrl, alt, shift)
-    }
-
-    /// Get current cursor position of active pane
-    pub fn cursor_pos(&self) -> (usize, usize) {
-        if let Some(pane) = self.active_pane() {
-            let (x, y) = pane.terminal.cursor();
-            (x as usize, y as usize)
-        } else {
-            (0, 0)
-        }
     }
 
     /// Check if any terminal pane in the entire multiplexer needs a redraw
@@ -655,7 +760,59 @@ impl App {
 
     /// Handle mouse button press down at coordinates (px, py)
     pub fn handle_mouse_down(&mut self, px: f64, py: f64, button: xilem::masonry::core::PointerButton, shift: bool, alt: bool, ctrl: bool) {
-        // 1. Check if clicked a pane's top-right floating close button (if split panes are present)
+        // 0. System settings overlay is modal: it swallows every click.
+        if self.show_settings {
+            let hit = self
+                .settings_items
+                .iter()
+                .find(|(_, rect)| {
+                    px >= rect.x && px <= rect.x + rect.width && py >= rect.y && py <= rect.y + rect.height
+                })
+                .map(|(action, _)| *action);
+            match hit {
+                Some(action) => self.apply_settings_action(action),
+                // Any click outside a control dismisses the overlay.
+                None => self.close_settings(),
+            }
+            return;
+        }
+
+        // 1. Scrollbar: pressing anywhere on the track takes the pointer and
+        // starts a thumb drag, so it must win over selection, mouse reporting
+        // and focus. Pressing outside the thumb additionally pages the view.
+        if let Some(scrollbar) = self.scrollbars.iter().copied().find(|sb| sb.contains(px, py)) {
+            self.focus_pane_by_id(scrollbar.pane_id);
+            let base_offset = self.pane_scroll_offset(scrollbar.pane_id);
+            self.scrollbar_drag = Some(ScrollbarDrag {
+                pane_id: scrollbar.pane_id,
+                start_y: py,
+                movable: (scrollbar.track_h - scrollbar.thumb_h).max(1.0),
+                max_scroll: scrollbar.max_scroll,
+                base_offset,
+                applied: base_offset,
+            });
+            // Capture the pointer at the OS level so the drag keeps tracking
+            // after the cursor leaves the window.
+            crate::win_util::capture_mouse();
+            if !scrollbar.thumb_contains(py) {
+                // Track press: page the viewport, towards history when the click
+                // was above the thumb and towards the active area when below.
+                let page = self.pane_viewport_rows(scrollbar.pane_id).saturating_sub(1).max(1) as i32;
+                let delta = if py < scrollbar.thumb_y { page } else { -page };
+                self.scroll_pane_by_id(scrollbar.pane_id, delta);
+                // Keep the drag baseline in step with the page we just applied.
+                if let Some(drag) = self.scrollbar_drag.as_mut() {
+                    let moved = (drag.base_offset + f64::from(delta)).clamp(0.0, drag.max_scroll);
+                    drag.base_offset = moved;
+                    drag.applied = moved;
+                }
+            }
+            self.redraw_counter += 1;
+            return;
+        }
+        self.scrollbar_drag = None;
+
+        // 2. Check if clicked a pane's top-right floating close button (if split panes are present)
         let mut clicked_close_pane_id = None;
         if let Some(group) = self.groups.get(self.active_group_index) {
             if let Some(tab) = group.tabs.get(group.active_tab_index) {
@@ -684,6 +841,11 @@ impl App {
         let clicked = self.find_pane_at(px, py);
         if let Some((pane_id, rect)) = clicked {
             self.focus_pane_by_id(pane_id);
+            // Capture the mouse for any primary press so a drag keeps receiving
+            // moves — and its release — after the cursor leaves the window.
+            if button == xilem::masonry::core::PointerButton::Primary {
+                crate::win_util::capture_mouse();
+            }
             let btn_id = pointer_btn_id(button);
 
             // If the hosted app captures the mouse (and Shift isn't held to bypass),
@@ -765,11 +927,142 @@ impl App {
         false
     }
 
+    // ─── Scrollbar dragging ───
+
+    /// Move the dragged thumb to follow the pointer and scroll its pane.
+    ///
+    /// Everything is derived from the snapshot taken at grab time, so no engine
+    /// query happens per mouse move. Sub-row steps are carried in `applied`
+    /// instead of being dropped, which keeps slow drags continuous.
+    fn update_scrollbar_drag(&mut self, drag: ScrollbarDrag, py: f64) {
+        if drag.max_scroll <= 0.0 {
+            return;
+        }
+        let travelled = (py - drag.start_y) / drag.movable * drag.max_scroll;
+        // Ghostty's scrollbar offset counts from the top of the scrollback, so
+        // the tail of the track is the live end. `scroll_viewport` takes a
+        // positive delta for scrolling up into history, i.e. for decreasing
+        // the offset, so the step is the negative of the remaining distance.
+        let target = (drag.base_offset + travelled).clamp(0.0, drag.max_scroll);
+        let step = (drag.applied - target).round() as i32;
+        if step == 0 {
+            return;
+        }
+        self.scroll_pane_by_id(drag.pane_id, step);
+        if let Some(drag) = self.scrollbar_drag.as_mut() {
+            drag.applied -= f64::from(step);
+        }
+        self.redraw_counter += 1;
+    }
+
+    /// Drop every in-flight drag (thumb, selection edge scroll), e.g. when the
+    /// window loses the pointer.
+    pub fn cancel_drag(&mut self) {
+        self.scrollbar_drag = None;
+        self.set_auto_scroll(None);
+        crate::win_util::release_mouse();
+        self.redraw_counter += 1;
+        self.wake();
+    }
+
+    // ─── Edge auto-scroll (selection dragged outside a pane) ───
+
+    /// Arm or disarm edge auto-scroll from a selection drag position.
+    ///
+    /// Triggered only past the pane's first/last row, so the scrollback scrolls
+    /// while the user keeps the button down outside it.
+    fn update_edge_auto_scroll(&mut self, pane_id: PaneId, rect: &crate::pane_tree::Rect, py: f64) {
+        const EDGE_MARGIN: f64 = 6.0;
+        let overflow_up = (rect.y + EDGE_MARGIN - py).max(0.0);
+        let overflow_down = (py - (rect.y + rect.height - EDGE_MARGIN)).max(0.0);
+
+        let armed = if overflow_up > 0.0 {
+            Some((overflow_up, 1))
+        } else if overflow_down > 0.0 {
+            Some((overflow_down, -1))
+        } else {
+            None
+        };
+
+        match armed {
+            // Ramp with distance: a row per tick at the edge, up to ten.
+            Some((overflow, sign)) => {
+                let step = ((1.0 + overflow / 30.0).floor() as i32).clamp(1, 10) * sign;
+                self.set_auto_scroll(Some(AutoScroll { pane_id, step }));
+            }
+            None => self.set_auto_scroll(None),
+        }
+    }
+
+    /// Set the auto-scroll state, keeping the timer's flag in sync.
+    fn set_auto_scroll(&mut self, auto: Option<AutoScroll>) {
+        let changed = self.auto_scroll.is_some() != auto.is_some();
+        self.auto_scroll = auto;
+        self.auto_scroll_active
+            .store(auto.is_some(), std::sync::atomic::Ordering::Relaxed);
+        if changed {
+            self.redraw_counter += 1;
+        }
+    }
+
+    /// One timer tick: scroll the pane by one auto-scroll step.
+    ///
+    /// The engine clamps at the ends of the scrollback, and the selection is
+    /// content-anchored, so scrolling extends what is selected.
+    pub fn apply_auto_scroll(&mut self) {
+        let Some(auto) = self.auto_scroll else {
+            return;
+        };
+        self.scroll_pane_by_id(auto.pane_id, auto.step);
+        self.redraw_counter += 1;
+    }
+
+    /// Scroll a specific pane by `delta_lines` (positive = up into history).
+    fn scroll_pane_by_id(&mut self, pane_id: PaneId, delta_lines: i32) {
+        for group in &mut self.groups {
+            for tab in &mut group.tabs {
+                if let Some((pane, _)) = tab.pane_tree.find_mut(pane_id) {
+                    pane.terminal.scroll_viewport(delta_lines);
+                    self.redraw_counter += 1;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Visible rows of a pane's viewport (used as the track-click page size).
+    fn pane_viewport_rows(&self, pane_id: PaneId) -> usize {
+        self.find_pane(pane_id).map_or(0, |pane| pane.terminal.grid_rows())
+    }
+
+    /// Current scroll offset of a pane, in rows from the top of the scrollback.
+    fn pane_scroll_offset(&self, pane_id: PaneId) -> f64 {
+        self.find_pane(pane_id).map_or(0.0, |pane| pane.terminal.scrollbar_state().1 as f64)
+    }
+
+    /// Look up a pane by id across all groups and tabs.
+    fn find_pane(&self, pane_id: PaneId) -> Option<&Pane> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.tabs.iter())
+            .find_map(|tab| tab.pane_tree.find(pane_id).map(|(pane, _)| pane))
+    }
+
     /// Handle mouse move/dragging at coordinates (px, py)
     pub fn handle_mouse_move(&mut self, px: f64, py: f64, is_dragging: bool, shift: bool, alt: bool, ctrl: bool) {
-        self.hover_pos = Some((px, py));
-        self.redraw_counter += 1;
+        // Only repaint when the hover position actually moved: a move event that
+        // lands on the same cell must not re-record the scene.
+        if self.hover_pos != Some((px, py)) {
+            self.hover_pos = Some((px, py));
+            self.redraw_counter += 1;
+        }
 
+        // Scrollbar drag takes precedence over the widget's own drag state: it
+        // is driven by `scrollbar_drag`, which outlives the press that set it.
+        if let Some(drag) = self.scrollbar_drag {
+            self.update_scrollbar_drag(drag, py);
+            return;
+        }
         if !is_dragging {
             return;
         }
@@ -792,7 +1085,7 @@ impl App {
         };
 
         if let Some(group) = self.groups.get_mut(self.active_group_index) {
-            if let Some(tab) = group.tabs.get_mut(group.active_tab_index) {
+            for tab in &mut group.tabs {
                 if let Some((pane, _)) = tab.pane_tree.find_mut(active_id) {
                     let cols = pane.terminal.grid_cols();
                     let rows = pane.terminal.grid_rows();
@@ -804,15 +1097,24 @@ impl App {
 
                     pane.terminal.update_selection(row as i32, col);
                     self.redraw_counter += 1;
+                    break;
                 }
             }
         }
+
+        // Dragging the selection past a pane's rows keeps the view scrolling.
+        self.update_edge_auto_scroll(active_id, &active_rect, py);
     }
 
     /// Handle mouse button release up at coordinates (px, py)
     pub fn handle_mouse_up(&mut self, px: f64, py: f64, button: xilem::masonry::core::PointerButton, shift: bool, alt: bool, ctrl: bool) {
         let btn_id = pointer_btn_id(button);
         self.mouse_down_btn = None;
+        // Releasing the button ends any drag and edge auto-scroll, wherever the
+        // pointer is.
+        self.scrollbar_drag = None;
+        self.set_auto_scroll(None);
+        crate::win_util::release_mouse();
 
         // When the app captures the mouse, report the release and skip copy-on-select.
         if self.try_report_release(px, py, btn_id, shift, alt, ctrl) {

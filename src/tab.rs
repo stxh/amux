@@ -8,9 +8,6 @@ use crate::terminal::TerminalConfig;
 
 /// A single tab within a terminal group
 pub struct Tab {
-    pub id: usize,
-    /// Display name (auto-generated or user-set)
-    pub name: String,
     /// The recursive pane tree
     pub pane_tree: PaneTree,
     /// Currently focused pane id within this tab
@@ -19,7 +16,7 @@ pub struct Tab {
 
 impl Tab {
     /// Create a new tab with a single terminal pane
-    pub fn new(tab_id: usize, pane_id: PaneId, config: &TerminalConfig) -> Self {
+    pub fn new(pane_id: PaneId, config: &TerminalConfig) -> Self {
         let mut pane_tree = PaneTree::new_leaf(pane_id, config);
         // Spawn shell for the initial pane
         if let Some((pane, _)) = pane_tree.find_mut(pane_id) {
@@ -30,8 +27,6 @@ impl Tab {
         }
 
         Self {
-            id: tab_id,
-            name: format!("Terminal {}", tab_id),
             pane_tree,
             active_pane_id: pane_id,
         }
@@ -127,10 +122,5 @@ impl Tab {
     /// Get mutable reference to the active pane
     pub fn active_pane_mut(&mut self) -> Option<&mut crate::pane::Pane> {
         self.pane_tree.find_mut(self.active_pane_id).map(|(p, _)| p)
-    }
-
-    /// Get total number of panes in this tab
-    pub fn pane_count(&self) -> usize {
-        self.pane_tree.pane_count()
     }
 }

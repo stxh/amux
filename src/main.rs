@@ -26,6 +26,7 @@ pub mod win_util {
         fn ShowWindow(hwnd: *mut c_void, cmd_show: i32) -> i32;
         fn IsZoomed(hwnd: *mut c_void) -> i32;
         fn GetWindowRect(hwnd: *mut c_void, rect: *mut std::ffi::c_void) -> i32;
+        fn SetCapture(hwnd: *mut c_void) -> *mut c_void;
     }
 
     #[link(name = "dwmapi")]
@@ -64,6 +65,40 @@ pub mod win_util {
                 ReleaseCapture();
                 SendMessageA(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
             }
+        }
+    }
+
+    /// Capture the mouse onto the app window, so drags (scrollbar, text
+    /// selection) keep receiving moves after the cursor leaves the window.
+    pub fn capture_mouse() {
+        unsafe {
+            let hwnd = app_hwnd();
+            if !hwnd.is_null() {
+                SetCapture(hwnd);
+            }
+        }
+    }
+
+    /// Give the mouse back to the system.
+    pub fn release_mouse() {
+        unsafe {
+            ReleaseCapture();
+        }
+    }
+
+    /// The app's window handle: the active window of this thread, falling back
+    /// to a title lookup (as `bring_to_front` does).
+    fn app_hwnd() -> *mut c_void {
+        unsafe {
+            let hwnd = GetActiveWindow();
+            if !hwnd.is_null() {
+                return hwnd;
+            }
+            let title: Vec<u16> = "amux - Terminal Multiplexer"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            FindWindowW(std::ptr::null(), title.as_ptr())
         }
     }
 
@@ -158,6 +193,8 @@ pub mod win_util {
 #[cfg(not(target_os = "windows"))]
 pub mod win_util {
     pub fn drag_active_window() {}
+    pub fn capture_mouse() {}
+    pub fn release_mouse() {}
     pub fn minimize_active_window() {}
     pub fn maximize_active_window() {}
     pub fn close_active_window() {
@@ -182,6 +219,10 @@ use xilem::{EventLoop, WidgetView, WindowOptions, Xilem};
 use xilem::dpi::LogicalSize;
 use xilem::masonry::peniko::Color;
 use std::time::Duration;
+
+/// Interval of one edge auto-scroll step while dragging a selection outside a
+/// pane; also the resolution at which the drag's overshoot can be re-applied.
+const AUTO_SCROLL_TICK: Duration = Duration::from_millis(30);
 
 // ─── Catppuccin Mocha Colors ───
 const CRUST: Color = Color::from_rgba8(0x11, 0x11, 0x1b, 0xff);
@@ -217,6 +258,29 @@ fn sidebar_item(idx: usize, text: String, is_active: bool, is_plus: bool) -> imp
     .padding(2.0)
 }
 
+/// Settings gear button — the first slot of the left activity bar.
+/// Uses the colour emoji gear so it matches the other activity-bar icons.
+fn settings_gear_item(state: &App) -> impl WidgetView<App> + use<> {
+    let is_open = state.show_settings;
+    let bg = if is_open {
+        BASE
+    } else {
+        Color::from_rgba8(0x00, 0x00, 0x00, 0x00) // transparent
+    };
+    let fg = if is_open { BLUE } else { SURFACE1 };
+    let l = label("⚙️").text_size(14.0).color(fg);
+
+    sized_box(
+        crate::terminal_keyboard::focusless_button(l, |data: &mut App| {
+            data.toggle_settings();
+        })
+    )
+    .fixed_width(Length::px(32.0))
+    .fixed_height(Length::px(32.0))
+    .background(bg)
+    .padding(2.0)
+}
+
 /// Left sidebar - vertical group toolbar (VSCode-style activity bar)
 fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
     let mut items: Vec<_> = if state.show_sidebar {
@@ -237,10 +301,12 @@ fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
 
     sized_box(
         flex_col((
+            settings_gear_item(state),
             flex_col(items)
                 .cross_axis_alignment(CrossAxisAlignment::Center)
                 .flex(1.0),
         ))
+        .cross_axis_alignment(CrossAxisAlignment::Start)
     )
     .fixed_width(Length::px(width))
     .background(if state.show_sidebar { CRUST } else { Color::from_rgba8(0, 0, 0, 0) })
@@ -351,21 +417,31 @@ fn tab_bar(state: &App) -> impl WidgetView<App> + use<> {
 
 /// Main application layout
 fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
+    // Auto-scroll tick: while a selection drag holds the pointer outside a pane
+    // the view keeps scrolling. The loop only wakes the UI when that is active.
+    let auto_scroll_flag = data.auto_scroll_active.clone();
+
     // Redraw trigger task to handle event-driven redraws
     let _redraw_trigger = task_raw(
-        |proxy, state: &mut App| {
+        move |proxy, state: &mut App| {
             state.register_redraw_proxy(proxy.clone());
             #[cfg(target_os = "windows")]
             win_util::set_rounded_corners();
+            // The build closure is `Fn`, so hand a fresh clone to each future.
+            let auto_scroll_flag = auto_scroll_flag.clone();
             async move {
-                // println!("DEBUG: task_raw future spawned (now 100% event-driven)!");
                 loop {
-                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                    tokio::time::sleep(AUTO_SCROLL_TICK).await;
+                    if !auto_scroll_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
+                    }
+                    let _ = proxy.message(());
                 }
             }
         },
         |state: &mut App, ()| {
             // println!("DEBUG: task_raw event callback received message!");
+            state.apply_auto_scroll();
             if state.check_and_clear_redraw() {
                 state.redraw_counter += 1;
                 // println!("DEBUG: task_raw check_and_clear_redraw was TRUE! redraw_counter updated");
@@ -412,6 +488,10 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
             }
             crate::terminal_keyboard::TerminalAction::MouseUp { x, y, button, shift, alt, ctrl } => {
                 state.handle_mouse_up(x, y, button, shift, alt, ctrl);
+                true
+            }
+            crate::terminal_keyboard::TerminalAction::Cancel => {
+                state.cancel_drag();
                 true
             }
             crate::terminal_keyboard::TerminalAction::TextCommit(text) => {

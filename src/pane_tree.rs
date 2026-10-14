@@ -61,11 +61,6 @@ impl PaneTree {
         }
     }
 
-    /// Create a leaf with an existing pane
-    pub fn from_pane(pane: Pane, state: TerminalPaneState) -> Self {
-        PaneTree::Leaf { pane, state }
-    }
-
     /// Split the pane identified by `target_id` in the given direction.
     /// Returns the new pane's id if the split was successful.
     pub fn split(
@@ -267,30 +262,6 @@ impl PaneTree {
             PaneTree::Split { first, second, .. } => {
                 first.for_each_mut(f);
                 second.for_each_mut(f);
-            }
-        }
-    }
-
-    /// Find the split node containing the given pane and adjust its ratio.
-    /// `delta` is added to the current ratio, clamped to [0.1, 0.9].
-    pub fn adjust_ratio(&mut self, pane_id: PaneId, delta: f64) -> bool {
-        match self {
-            PaneTree::Leaf { .. } => false,
-            PaneTree::Split { first, second, ratio, .. } => {
-                // Check if this split directly contains the target pane
-                let first_ids = first.pane_ids();
-                let second_ids = second.pane_ids();
-                if first_ids.contains(&pane_id) || second_ids.contains(&pane_id) {
-                    // Only adjust if the pane is a direct child (leaf)
-                    let is_direct = matches!(first.as_ref(), PaneTree::Leaf { pane, .. } if pane.id == pane_id)
-                        || matches!(second.as_ref(), PaneTree::Leaf { pane, .. } if pane.id == pane_id);
-                    if is_direct {
-                        *ratio = (*ratio + delta).clamp(0.1, 0.9);
-                        return true;
-                    }
-                }
-                // Recurse
-                first.adjust_ratio(pane_id, delta) || second.adjust_ratio(pane_id, delta)
             }
         }
     }

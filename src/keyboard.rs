@@ -16,6 +16,15 @@ use crate::terminal::Terminal;
 /// Handle a keyboard character event with modifier information
 /// This implements the comprehensive direct hotkey table (Windows Ctrl maps to Mac ⌘)
 pub fn handle_key_input(app: &mut App, key: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
+    // ─── System settings overlay: modal ───
+    // While it is open every key is consumed by the overlay, so nothing leaks
+    // into the terminal PTY.
+    if app.show_settings {
+        app.close_settings();
+        app.redraw_counter += 1;
+        return true;
+    }
+
     // ─── tmux-style prefix: next plain key is a multiplexer command ───
     if app.prefix_mode && !ctrl && !alt {
         app.handle_key(key);
@@ -295,12 +304,12 @@ pub fn handle_key_input(app: &mut App, key: &str, ctrl: bool, alt: bool, shift: 
         return true;
     }
     if ctrl && !shift && !alt && key == "," {
-        app.status_message = "Settings".to_string();
-        app.redraw_counter += 1;
+        app.toggle_settings();
         return true;
     }
     if ctrl && shift && !alt && key == "," {
-        app.status_message = "Reload configuration".to_string();
+        crate::config::open_config_dir();
+        app.status_message = "Opened config directory".to_string();
         app.redraw_counter += 1;
         return true;
     }
@@ -445,25 +454,4 @@ fn build_ansi_sequence(key: &str, mods: u8, ctrl: bool, alt: bool, shift: bool) 
     }
 
     result
-}
-
-/// Handle text input from IME or direct character input
-pub fn handle_text_input(app: &mut App, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-
-    // In prefix mode, first character is the command
-    if app.prefix_mode {
-        if let Some(first_char) = text.chars().next() {
-            app.handle_key(&first_char.to_string());
-            app.redraw_counter += 1;
-        }
-        return;
-    }
-
-    // Forward to active terminal
-    if let Some(pane) = app.active_pane_mut() {
-        let _ = pane.terminal.write_input(text.as_bytes());
-    }
 }
