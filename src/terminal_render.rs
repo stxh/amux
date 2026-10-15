@@ -179,6 +179,16 @@ fn cell_metrics_full(
     })
 }
 
+/// Snap a row's vertical span to device pixels.
+///
+/// Cell heights are fractional once CJK metrics are in play, so filling rows
+/// with their raw float bounds leaves 1px seams between every few rows (the
+/// dark pane background shows through as black lines). Flooring the top and
+/// ceiling the bottom makes consecutive rows abut or overlap instead.
+fn row_span(y: f64, cell_h: f64) -> (f64, f64) {
+    (y.floor(), (y + cell_h).ceil())
+}
+
 /// Catppuccin Mocha color scheme
 mod colors {
     use super::Color;
@@ -482,6 +492,7 @@ pub fn render_terminal_with_offset(
 
         // Cell backgrounds (skip default bg and selected cells; wide cells
         // paint their trailing spacer too).
+        let (row_top, row_bottom) = row_span(y, cell_h);
         for cell in &cells {
             if cell.is_spacer || cell.selected || cell.bg.is_none() {
                 continue;
@@ -489,7 +500,7 @@ pub fn render_terminal_with_offset(
             let bx = offset_x + cell.x as f64 * cell_w;
             let w = if cell.wide { cell_w * 2.0 } else { cell_w };
             let bg_color = cell.bg.unwrap();
-            let cell_rect = Rect::new(bx, bg_row_y, bx + w, bg_row_y + cell_h);
+            let cell_rect = Rect::new(bx, row_top, bx + w, row_bottom);
             painter.fill(&cell_rect, bg_color).draw();
         }
 
@@ -500,7 +511,7 @@ pub fn render_terminal_with_offset(
                 let end = (sel.end_x as usize).min(cols - 1);
                 let bx = offset_x + start as f64 * cell_w;
                 let ex = offset_x + (end + 1) as f64 * cell_w;
-                let sel_rect = Rect::new(bx, bg_row_y, ex, bg_row_y + cell_h);
+                let sel_rect = Rect::new(bx, row_top, ex, row_bottom);
                 painter.fill(&sel_rect, colors::BLUE).draw();
             }
         }
@@ -547,7 +558,7 @@ pub fn render_terminal_with_offset(
                     .map(|c| if c.wide { cell_w * 2.0 } else { cell_w })
                     .unwrap_or(cell_w);
                 let cursor_x = offset_x + cx as f64 * cell_w;
-                let cursor_rect = Rect::new(cursor_x, bg_row_y, cursor_x + cursor_w, bg_row_y + cell_h);
+                let cursor_rect = Rect::new(cursor_x, row_top, cursor_x + cursor_w, row_bottom);
                 painter.fill(&cursor_rect, cursor_brush).draw();
             }
         }
