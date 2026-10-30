@@ -8,6 +8,8 @@ mod group;
 mod keyboard;
 mod pane;
 mod pane_tree;
+mod proc_cwd;
+mod sidebar_icon;
 mod single_instance;
 mod tab;
 mod terminal;
@@ -235,7 +237,14 @@ const BLUE: Color = Color::from_rgba8(0x89, 0xb4, 0xfa, 0xff);
 #[allow(dead_code)]
 const TEAL: Color = Color::from_rgba8(0x94, 0xe2, 0xd5, 0xff);
 
+/// One activity-bar icon.
+///
+/// `is_plus` marks the "new workspace" slot: it activates but has no workspace
+/// behind it, so it gets no tooltip and no close action.
 fn sidebar_item(idx: usize, text: String, is_active: bool, is_plus: bool) -> impl WidgetView<App> + use<> {
+    use crate::sidebar_icon::{sidebar_icon, SidebarIconEvent};
+    use xilem::core::MessageResult;
+
     let bg = if is_active {
         BASE
     } else {
@@ -244,16 +253,46 @@ fn sidebar_item(idx: usize, text: String, is_active: bool, is_plus: bool) -> imp
     let text_color = if is_active { BLUE } else { SURFACE1 };
     let l = label(text).text_size(14.0).color(text_color);
     sized_box(
-        crate::terminal_keyboard::focusless_button(l, move |data: &mut App| {
-            if is_plus {
-                data.add_group();
-            } else {
-                data.switch_group(idx);
+        sidebar_icon(l, move |data: &mut App, event: SidebarIconEvent| match event {
+            // Primary click: switch to this workspace (or add one).
+            SidebarIconEvent::Activate => {
+                // While the close confirmation is open it owns the click: the
+                // click dismisses it instead of navigating behind the dialog.
+                if data.pending_group_close.is_some() {
+                    data.cancel_close_group();
+                    return MessageResult::Action(());
+                }
+                if is_plus {
+                    data.add_group();
+                } else {
+                    data.switch_group(idx);
+                }
+                MessageResult::Action(())
+            }
+            // Secondary click: ask before closing the workspace.
+            SidebarIconEvent::Secondary => {
+                if !is_plus {
+                    data.request_close_group(idx);
+                }
+                MessageResult::Action(())
+            }
+            // Hover: show the workspace's title and the shell's live directory.
+            SidebarIconEvent::Hover => {
+                if !is_plus {
+                    data.set_hover_group(Some(idx));
+                }
+                MessageResult::Action(())
+            }
+            SidebarIconEvent::Unhover => {
+                if !is_plus {
+                    data.clear_hover_group(idx);
+                }
+                MessageResult::Action(())
             }
         })
     )
-    .fixed_width(Length::px(32.0))
-    .fixed_height(Length::px(32.0))
+    .fixed_width(Length::px(crate::terminal_render::SIDEBAR_ICON))
+    .fixed_height(Length::px(crate::terminal_render::SIDEBAR_ICON))
     .background(bg)
     .padding(2.0)
 }
@@ -297,7 +336,11 @@ fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
         items.push(sidebar_item(999, "➕".to_string(), false, true));
     }
 
-    let width = if state.show_sidebar { 40.0 } else { 0.0 };
+    let width = if state.show_sidebar {
+        crate::terminal_render::SIDEBAR_WIDTH
+    } else {
+        0.0
+    };
 
     sized_box(
         flex_col((
@@ -310,7 +353,11 @@ fn sidebar(state: &App) -> impl WidgetView<App> + use<> {
     )
     .fixed_width(Length::px(width))
     .background(if state.show_sidebar { CRUST } else { Color::from_rgba8(0, 0, 0, 0) })
-    .padding(if state.show_sidebar { 2.0 } else { 0.0 })
+    .padding(if state.show_sidebar {
+        crate::terminal_render::SIDEBAR_PADDING
+    } else {
+        0.0
+    })
 }
 
 /// Right sidebar - system monitor panel (toggled via Alt+Ctrl+B)
@@ -404,11 +451,18 @@ fn tab_bar(state: &App) -> impl WidgetView<App> + use<> {
         label("")
     };
 
-    flex_row((
-        flex_row(items),
-        add_tab_btn,
-        prefix_indicator,
-    ))
+    sized_box(
+        flex_row((
+            flex_row(items),
+            add_tab_btn,
+            prefix_indicator,
+        ))
+        .cross_axis_alignment(CrossAxisAlignment::Center),
+    )
+    // Fixed so the activity-bar tooltip (painted by the canvas) can be placed
+    // at the hovered icon's height: the canvas starts this far below the
+    // window top.
+    .fixed_height(Length::px(crate::terminal_render::TAB_BAR_HEIGHT))
     .background(MANTLE)
     .padding(1.0)
 }
@@ -417,9 +471,12 @@ fn tab_bar(state: &App) -> impl WidgetView<App> + use<> {
 
 /// Main application layout
 fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
-    // Auto-scroll tick: while a selection drag holds the pointer outside a pane
-    // the view keeps scrolling. The loop only wakes the UI when that is active.
+    // UI tick: while a selection drag holds the pointer outside a pane the view
+    // keeps scrolling, and while the activity-bar tooltip is up it needs to be
+    // checked for its auto-hide deadline. The loop only wakes the UI when one
+    // of those is active.
     let auto_scroll_flag = data.auto_scroll_active.clone();
+    let tooltip_flag = data.tooltip_active.clone();
 
     // Redraw trigger task to handle event-driven redraws
     let _redraw_trigger = task_raw(
@@ -429,10 +486,13 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
             win_util::set_rounded_corners();
             // The build closure is `Fn`, so hand a fresh clone to each future.
             let auto_scroll_flag = auto_scroll_flag.clone();
+            let tooltip_flag = tooltip_flag.clone();
             async move {
                 loop {
                     tokio::time::sleep(AUTO_SCROLL_TICK).await;
-                    if !auto_scroll_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    if !auto_scroll_flag.load(std::sync::atomic::Ordering::Relaxed)
+                        && !tooltip_flag.load(std::sync::atomic::Ordering::Relaxed)
+                    {
                         continue;
                     }
                     let _ = proxy.message(());
@@ -442,6 +502,7 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
         |state: &mut App, ()| {
             // println!("DEBUG: task_raw event callback received message!");
             state.apply_auto_scroll();
+            state.expire_hover_tooltip();
             if state.check_and_clear_redraw() {
                 state.redraw_counter += 1;
                 // println!("DEBUG: task_raw check_and_clear_redraw was TRUE! redraw_counter updated");
@@ -449,6 +510,8 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
             state.poll_single_instance();
             state.reap_exited_panes();
             state.apply_pending_resizes();
+            // Keep the activity-bar tooltip's path current while it is shown.
+            state.refresh_hover_tooltip();
             if !state.running {
                 // masonry_winit only checks its exit flag after window events,
                 // but this callback runs on the user-event path, so the flag
@@ -483,8 +546,10 @@ fn app_logic(data: &mut App) -> impl WidgetView<App> + use<> {
                 true
             }
             crate::terminal_keyboard::TerminalAction::MouseMove { x, y, is_dragging, shift, alt, ctrl } => {
-                state.handle_mouse_move(x, y, is_dragging, shift, alt, ctrl);
-                true
+                // Reports whether anything visible changed: a move that only
+                // shifts the pointer over blank terminal space must not ask for
+                // a repaint, or the whole grid is re-rendered per move event.
+                state.handle_mouse_move(x, y, is_dragging, shift, alt, ctrl)
             }
             crate::terminal_keyboard::TerminalAction::MouseUp { x, y, button, shift, alt, ctrl } => {
                 state.handle_mouse_up(x, y, button, shift, alt, ctrl);

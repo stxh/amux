@@ -22,6 +22,14 @@ use xilem::core::ViewPathTracker;
 
 static TERMINAL_WIDGET_ID: Mutex<Option<WidgetId>> = Mutex::new(None);
 
+/// The terminal widget's id, once it has been built.
+///
+/// Other widgets (the activity bar) use it to hand keyboard focus back to the
+/// terminal after a click.
+pub fn terminal_widget_id() -> Option<WidgetId> {
+    TERMINAL_WIDGET_ID.lock().ok().and_then(|id| *id)
+}
+
 
 #[derive(Debug, Clone)]
 pub struct KeyAction {
@@ -303,8 +311,9 @@ impl Widget for TerminalKeyboardWidget {
                 }
             }
             TextEvent::Ime(xilem::masonry::core::Ime::Preedit(_, _)) => {
-                // IME composition in progress - ignore preedit rendering for now
-                // The OS handles the composition window
+                // IME composition in progress - ignore preedit rendering for now.
+                // The OS draws the composition in its own window, anchored to the
+                // IME area the keyboard view keeps on the caret (see `rebuild`).
             }
             _ => {}
         }
@@ -398,9 +407,21 @@ where
         _prev: &Self,
         _view_state: &mut Self::ViewState,
         _ctx: &mut xilem::ViewCtx,
-        _element: xilem::core::Mut<'_, Self::Element>,
-        _app_state: &mut App,
+        mut element: xilem::core::Mut<'_, Self::Element>,
+        app_state: &mut App,
     ) {
+        // Follow the caret with the IME area. Masonry hands the focused widget's
+        // IME area to the platform, which is where the IME window (e.g. the
+        // Chinese candidate box) is anchored; with no area set it uses this
+        // widget's whole box, so the candidate box appeared in the top-left
+        // corner of the terminal instead of at the text being typed.
+        //
+        // `rebuild` runs whenever the app logic re-runs (every keystroke and
+        // every PTY wake-up), and the root rebuild is followed by the rewrite
+        // passes that push a changed IME area to the window.
+        if let Some(caret) = app_state.ime_caret_rect() {
+            element.ctx.set_ime_area(caret);
+        }
     }
 
     fn teardown(
@@ -420,10 +441,15 @@ where
         app_state: &mut App,
     ) -> xilem::core::MessageResult<()> {
         if let Some(action) = message.take_message::<TerminalAction>() {
+            // Only a handler that actually changed visible state asks for a
+            // rebuild. `Action` re-runs the app logic, which re-records the
+            // whole terminal scene, so reporting every mouse move as an action
+            // painted the entire grid as often as the pointer could be polled.
             if (self.on_key)(app_state, *action) {
-                // Handled
+                xilem::core::MessageResult::Action(())
+            } else {
+                xilem::core::MessageResult::Nop
             }
-            xilem::core::MessageResult::Action(())
         } else {
             xilem::core::MessageResult::Stale
         }

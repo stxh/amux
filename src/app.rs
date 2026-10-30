@@ -74,12 +74,53 @@ pub struct App {
     pub scrollbars: Vec<crate::terminal_render::ScrollbarGeometry>,
     /// Active scrollbar thumb drag: pane plus pointer-to-thumb-centre offset
     scrollbar_drag: Option<ScrollbarDrag>,
+    /// Splitter drag in progress: which split is being resized and the ratio it
+    /// had when the drag started.
+    split_drag: Option<SplitDrag>,
+    /// Splitter handles of the active tab, rebuilt every frame by the renderer
+    /// and hit-tested by the mouse handlers.
+    pub splitters: Vec<crate::pane_tree::SplitterGeometry>,
     /// Edge auto-scroll while a selection drag holds the pointer outside a pane
     auto_scroll: Option<AutoScroll>,
+    /// Cell a selection drag currently ends in. A move that lands on the same
+    /// cell cannot change the picture, so it needs no repaint.
+    drag_selection_focus: Option<(i32, usize)>,
     /// Mirrors `auto_scroll.is_some()` so the UI timer only wakes the loop
     /// when scrolling is actually needed.
     pub auto_scroll_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Group whose close confirmation dialog is open (right click on its
+    /// activity-bar icon). Modal: it swallows clicks and keys while set.
+    pub pending_group_close: Option<usize>,
+    /// Hit rects of the close-confirmation buttons (rebuilt every frame).
+    pub confirm_items: Vec<(crate::terminal_render::ConfirmAction, crate::pane_tree::Rect)>,
+    /// Activity-bar tooltip contents (None when no icon is hovered).
+    pub hover_tooltip: Option<GroupTooltip>,
+    /// When the tooltip was first shown; drives [`TOOLTIP_TIMEOUT`].
+    tooltip_shown_at: Option<std::time::Instant>,
+    /// Mirrors `hover_tooltip.is_some()` so the UI timer wakes the loop to
+    /// expire the tooltip without waking it the rest of the time.
+    pub tooltip_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// What the activity-bar tooltip shows for one workspace.
+#[derive(Clone, Debug)]
+pub struct GroupTooltip {
+    /// Index of the hovering icon in `App::groups`.
+    pub group_index: usize,
+    /// Workspace (group) name.
+    pub name: String,
+    /// Terminal title of the workspace's active pane, when it sets one.
+    pub title: Option<String>,
+    /// Live working directory of that pane's shell.
+    pub cwd: Option<String>,
+}
+
+/// How long the activity-bar tooltip stays up before hiding itself.
+///
+/// Hover already reports the pointer leaving, but that event can be missed (a
+/// captured pointer, the window losing focus); the timeout is the safety net
+/// that keeps a stale tooltip from sitting on top of the terminal forever.
+const TOOLTIP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// In-flight scrollbar drag.
 ///
@@ -99,6 +140,26 @@ struct ScrollbarDrag {
     base_offset: f64,
     /// Last target handed to the engine; keeps sub-row steps from being lost.
     applied: f64,
+}
+
+/// In-flight splitter drag: the split being resized and its starting ratio.
+#[derive(Clone, Copy)]
+struct SplitDrag {
+    split: crate::pane_tree::SplitId,
+    /// Tab (in the active workspace) whose pane tree holds the split. The
+    /// splitter belongs to the tab the drag started in, so a mid-drag tab
+    /// switch keeps resizing it.
+    tab_index: usize,
+    /// Axis the divider travels along.
+    direction: SplitDirection,
+    /// Length available to the split along that axis, in pixels.
+    total: f64,
+    /// Pointer position (client space) when the drag started, and the ratio the
+    /// split had then: the divider follows the pointer's travel, so grabbing the
+    /// handle off its centre does not jump it.
+    start_x: f64,
+    start_y: f64,
+    start_ratio: f64,
 }
 
 /// Edge auto-scroll driven by a selection drag past a pane's row bounds.
@@ -157,8 +218,16 @@ impl App {
             settings_panel: None,
             scrollbars: Vec::new(),
             scrollbar_drag: None,
+            split_drag: None,
+            splitters: Vec::new(),
             auto_scroll: None,
+            drag_selection_focus: None,
             auto_scroll_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pending_group_close: None,
+            confirm_items: Vec::new(),
+            hover_tooltip: None,
+            tooltip_shown_at: None,
+            tooltip_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -312,6 +381,38 @@ impl App {
         self.active_group_mut()?.active_tab_mut()?.active_pane_mut()
     }
 
+    /// Where the caret of the active pane sits, in terminal-canvas coordinates.
+    ///
+    /// Masonry reports the focused widget's IME area to the platform, and the
+    /// platform puts the IME window (the Chinese/Japanese candidate box) next to
+    /// it. Left unset, that area is the widget's whole box, so the candidate box
+    /// lands in the terminal's top-left corner instead of at the text being
+    /// typed; this is the rect that keeps it on the caret.
+    pub fn ime_caret_rect(&self) -> Option<xilem::masonry::kurbo::Rect> {
+        let (cell_w, cell_h) = (self.cell_w, self.cell_h);
+        if cell_w <= 0.0 || cell_h <= 0.0 {
+            // The canvas has not measured the font yet.
+            return None;
+        }
+        let tab = self.active_group()?.active_tab()?;
+        let pane_id = tab.active_pane_id;
+        // Pane rects are published by the canvas on every frame.
+        let (_, rect) = self
+            .last_pane_layouts
+            .iter()
+            .find(|(id, _)| *id == pane_id)?;
+        let (pane, _) = tab.pane_tree.find(pane_id)?;
+        let (col, row) = pane.terminal.cursor_cell()?;
+        let x = rect.x + col as f64 * cell_w;
+        let y = rect.y + row as f64 * cell_h;
+        Some(xilem::masonry::kurbo::Rect::new(
+            x,
+            y,
+            x + cell_w,
+            y + cell_h,
+        ))
+    }
+
     /// Apply all pending terminal resizes
     pub fn apply_pending_resizes(&mut self) {
         let cell_w = self.cell_w.max(1.0).ceil() as u16;
@@ -373,6 +474,156 @@ impl App {
         }
     }
 
+    /// Ask for confirmation before closing the workspace at `index` (right
+    /// click on its activity-bar icon).
+    pub fn request_close_group(&mut self, index: usize) {
+        if index >= self.groups.len() {
+            return;
+        }
+        if self.groups.len() <= 1 {
+            self.status_message = "Cannot close the last workspace".to_string();
+            self.redraw_counter += 1;
+            self.wake();
+            return;
+        }
+        // The overlays are exclusive: the settings panel would swallow the
+        // confirmation's clicks.
+        self.show_settings = false;
+        self.set_tooltip(None);
+        let name = self.groups[index].name.clone();
+        self.pending_group_close = Some(index);
+        self.status_message = format!("Close {}?", name);
+        self.redraw_counter += 1;
+        self.wake();
+    }
+
+    /// Dismiss the close confirmation (Cancel button, Esc, click outside).
+    pub fn cancel_close_group(&mut self) {
+        if self.pending_group_close.take().is_some() {
+            self.status_message = "Close cancelled".to_string();
+            self.redraw_counter += 1;
+            self.wake();
+        }
+    }
+
+    /// Apply the close confirmation.
+    pub fn confirm_close_group(&mut self) {
+        if let Some(index) = self.pending_group_close.take() {
+            self.close_group_at(index);
+        }
+    }
+
+    /// Close the workspace at `index`. The last workspace is never closed, so
+    /// the window always keeps a terminal to type in.
+    pub fn close_group_at(&mut self, index: usize) {
+        if index >= self.groups.len() {
+            return;
+        }
+        if self.groups.len() <= 1 {
+            self.status_message = "Cannot close the last workspace".to_string();
+        } else {
+            let name = self.groups[index].name.clone();
+            // Dropping the group drops its panes, whose `Drop` kills the shells.
+            self.groups.remove(index);
+            if index < self.active_group_index {
+                // Keep the same workspace active when one before it goes away.
+                self.active_group_index -= 1;
+            } else if self.active_group_index >= self.groups.len() {
+                self.active_group_index = self.groups.len() - 1;
+            }
+            self.status_message = format!("Closed {}", name);
+        }
+        self.set_tooltip(None);
+        self.redraw_counter += 1;
+        self.wake();
+    }
+
+    /// Set (or clear) the hovered activity-bar icon and refresh the tooltip.
+    ///
+    /// The tooltip contents are snapshotted here, on hover, so the live shell
+    /// directory is read once per hover instead of once per repaint.
+    pub fn set_hover_group(&mut self, index: Option<usize>) {
+        if self.hover_tooltip.as_ref().map(|tip| tip.group_index) == index {
+            return;
+        }
+        let tip = index.and_then(|idx| self.group_tooltip(idx));
+        self.set_tooltip(tip);
+        self.redraw_counter += 1;
+        self.wake();
+    }
+
+    /// Clear the tooltip when the icon at `index` is the one it belongs to.
+    pub fn clear_hover_group(&mut self, index: usize) {
+        if self.hover_tooltip.as_ref().map(|tip| tip.group_index) == Some(index) {
+            self.set_tooltip(None);
+            self.redraw_counter += 1;
+            self.wake();
+        }
+    }
+
+    /// Hide the tooltip once it has been up for [`TOOLTIP_TIMEOUT`].
+    ///
+    /// Driven by the UI timer while `tooltip_active` is set.
+    pub fn expire_hover_tooltip(&mut self) {
+        let Some(shown_at) = self.tooltip_shown_at else {
+            return;
+        };
+        if shown_at.elapsed() < TOOLTIP_TIMEOUT {
+            return;
+        }
+        self.set_tooltip(None);
+        self.redraw_counter += 1;
+    }
+
+    /// Store the tooltip, starting (or ending) its auto-hide timer.
+    fn set_tooltip(&mut self, tip: Option<GroupTooltip>) {
+        let showing = tip.is_some();
+        if showing {
+            // A content refresh keeps the original deadline: the tooltip must
+            // still go away on time while output keeps streaming in.
+            if self.hover_tooltip.is_none() {
+                self.tooltip_shown_at = Some(std::time::Instant::now());
+            }
+        } else {
+            self.tooltip_shown_at = None;
+        }
+        self.tooltip_active
+            .store(showing, std::sync::atomic::Ordering::Relaxed);
+        self.hover_tooltip = tip;
+    }
+
+    /// Re-read the tooltip's live values (terminal title and shell directory).
+    ///
+    /// Called on UI wake-ups: a `cd` typed while the pointer rests on the
+    /// activity bar updates the tooltip without having to re-hover the icon.
+    pub fn refresh_hover_tooltip(&mut self) {
+        let Some(index) = self.hover_tooltip.as_ref().map(|tip| tip.group_index) else {
+            return;
+        };
+        let refreshed = self.group_tooltip(index);
+        let changed = match (&self.hover_tooltip, &refreshed) {
+            (Some(old), Some(new)) => old.cwd != new.cwd || old.title != new.title,
+            (_, None) => true,
+            (None, _) => false,
+        };
+        self.set_tooltip(refreshed);
+        if changed {
+            self.redraw_counter += 1;
+        }
+    }
+
+    /// Snapshot the tooltip contents for one workspace.
+    fn group_tooltip(&self, index: usize) -> Option<GroupTooltip> {
+        let group = self.groups.get(index)?;
+        let pane = group.active_tab().and_then(|tab| tab.active_pane());
+        Some(GroupTooltip {
+            group_index: index,
+            name: group.name.clone(),
+            title: pane.and_then(|pane| pane.terminal.title()),
+            cwd: pane.and_then(|pane| pane.terminal.current_dir()),
+        })
+    }
+
     /// Switch to next group
     pub fn next_group(&mut self) {
         if !self.groups.is_empty() {
@@ -399,9 +650,31 @@ impl App {
 
     // ─── Tab management (delegates to active group) ───
 
+    /// Terminal config for a shell added to the active workspace.
+    ///
+    /// A new tab or pane continues in the directory the workspace's most
+    /// recent terminal is in, read live from that shell, so it follows `cd`
+    /// and the tooltip and the new shell agree. The configured directory (from
+    /// `amux <path>`) still covers workspaces that have no shell yet.
+    fn new_shell_config(&self) -> TerminalConfig {
+        let mut config = self.terminal_config.clone();
+        let inherited = self
+            .active_group()
+            .and_then(|group| group.active_tab())
+            .and_then(|tab| tab.active_pane())
+            .and_then(|pane| pane.terminal.current_dir())
+            // A shell may sit in a directory that has since been removed; a
+            // spawn there would fail, so fall back to the configured default.
+            .filter(|dir| std::path::Path::new(dir).is_dir());
+        if let Some(dir) = inherited {
+            config.working_dir = Some(std::path::PathBuf::from(dir));
+        }
+        config
+    }
+
     /// Add a new tab to the active group
     pub fn add_tab(&mut self) {
-        let config = self.terminal_config.clone();
+        let config = self.new_shell_config();
         self.add_tab_with_config(config);
     }
 
@@ -497,7 +770,7 @@ impl App {
         let new_pane_id = self.next_pane_id;
         self.next_pane_id += 1;
 
-        let config = self.terminal_config.clone();
+        let config = self.new_shell_config();
         let proxy = self.redraw_proxy.clone(); // Clone first to avoid borrow conflicts
         if let Some(group) = self.active_group_mut() {
             if let Some(id) = group.split_active_pane(direction, new_pane_id, &config) {
@@ -760,6 +1033,24 @@ impl App {
 
     /// Handle mouse button press down at coordinates (px, py)
     pub fn handle_mouse_down(&mut self, px: f64, py: f64, button: xilem::masonry::core::PointerButton, shift: bool, alt: bool, ctrl: bool) {
+        // 0a. Close-workspace confirmation is modal: it swallows every click.
+        if self.pending_group_close.is_some() {
+            let hit = self
+                .confirm_items
+                .iter()
+                .find(|(_, rect)| {
+                    px >= rect.x && px <= rect.x + rect.width && py >= rect.y && py <= rect.y + rect.height
+                })
+                .map(|(action, _)| *action);
+            match hit {
+                Some(crate::terminal_render::ConfirmAction::Confirm) => self.confirm_close_group(),
+                // Cancel, and any click outside the panel: closing a workspace
+                // is not something to do by accident.
+                Some(crate::terminal_render::ConfirmAction::Cancel) | None => self.cancel_close_group(),
+            }
+            return;
+        }
+
         // 0. System settings overlay is modal: it swallows every click.
         if self.show_settings {
             let hit = self
@@ -811,6 +1102,42 @@ impl App {
             return;
         }
         self.scrollbar_drag = None;
+
+        // 1b. Split divider: pressing it starts resizing its split. It wins
+        // over pane clicks, exactly like the scrollbar does.
+        let mut split_hit = None;
+        if self.split_drag.is_none() {
+            if let Some(group) = self.active_group() {
+                // Splitters are published by the frame that laid the tab out,
+                // so a stale list without an active tab is not trusted.
+                if group.tabs.get(group.active_tab_index).is_some() {
+                    if let Some(split) = self
+                        .splitters
+                        .iter()
+                        .copied()
+                        .find(|split| split.contains(px, py))
+                    {
+                        split_hit = Some((group.active_tab_index, split));
+                    }
+                }
+            }
+        }
+        self.split_drag = split_hit.map(|(tab_index, split)| SplitDrag {
+            split: split.split,
+            tab_index,
+            direction: split.direction,
+            total: split.total,
+            start_x: px,
+            start_y: py,
+            start_ratio: split.ratio,
+        });
+        if self.split_drag.is_some() {
+            // Capture the pointer at the OS level so the drag keeps tracking
+            // after the cursor leaves the window.
+            crate::win_util::capture_mouse();
+            self.redraw_counter += 1;
+            return;
+        }
 
         // 2. Check if clicked a pane's top-right floating close button (if split panes are present)
         let mut clicked_close_pane_id = None;
@@ -878,6 +1205,7 @@ impl App {
                                 3 => pane.terminal.start_line_selection(row as i32, col),
                                 _ => pane.terminal.start_selection(row as i32, col),
                             }
+                            self.drag_selection_focus = Some((row as i32, col));
                             self.redraw_counter += 1;
                         } else if button == xilem::masonry::core::PointerButton::Secondary {
                             // Right click -> Paste clipboard content
@@ -887,6 +1215,7 @@ impl App {
                                 }
                             }
                             pane.terminal.clear_selection();
+                            self.drag_selection_focus = None;
                             self.redraw_counter += 1;
                         }
                     }
@@ -934,9 +1263,11 @@ impl App {
     /// Everything is derived from the snapshot taken at grab time, so no engine
     /// query happens per mouse move. Sub-row steps are carried in `applied`
     /// instead of being dropped, which keeps slow drags continuous.
-    fn update_scrollbar_drag(&mut self, drag: ScrollbarDrag, py: f64) {
+    ///
+    /// Returns whether the pane actually scrolled.
+    fn update_scrollbar_drag(&mut self, drag: ScrollbarDrag, py: f64) -> bool {
         if drag.max_scroll <= 0.0 {
-            return;
+            return false;
         }
         let travelled = (py - drag.start_y) / drag.movable * drag.max_scroll;
         // Ghostty's scrollbar offset counts from the top of the scrollback, so
@@ -946,19 +1277,65 @@ impl App {
         let target = (drag.base_offset + travelled).clamp(0.0, drag.max_scroll);
         let step = (drag.applied - target).round() as i32;
         if step == 0 {
-            return;
+            return false;
         }
         self.scroll_pane_by_id(drag.pane_id, step);
         if let Some(drag) = self.scrollbar_drag.as_mut() {
             drag.applied -= f64::from(step);
         }
         self.redraw_counter += 1;
+        true
     }
 
-    /// Drop every in-flight drag (thumb, selection edge scroll), e.g. when the
-    /// window loses the pointer.
+    /// Divider drag: move the split's ratio with the pointer.
+    ///
+    /// The ratio follows the pointer's travel from the press, measured against
+    /// the split's own length, so grabbing the handle off its centre does not
+    /// jump the divider. It is clamped so neither side collapses.
+    ///
+    /// Returns whether the layout changed.
+    fn update_split_drag(&mut self, drag: SplitDrag, px: f64, py: f64) -> bool {
+        // Smallest share a side may keep, in pixels.
+        const MIN_EXTENT: f64 = 48.0;
+
+        let travel = match drag.direction {
+            SplitDirection::Horizontal => px - drag.start_x,
+            SplitDirection::Vertical => py - drag.start_y,
+        };
+        let total = drag.total.max(1.0);
+        let min = (MIN_EXTENT / total).min(0.45);
+        let ratio = (drag.start_ratio + travel / total).clamp(min, 1.0 - min);
+        // Clamped at either end the divider stops moving; a move that cannot
+        // change the layout must not queue a repaint (and a PTY resize).
+        let current = self
+            .splitters
+            .iter()
+            .find(|split| split.split == drag.split)
+            .map(|split| split.ratio);
+        if current.is_some_and(|current| (current - ratio).abs() < 1e-6) {
+            return false;
+        }
+        let group_index = self.active_group_index;
+        let Some(tab) = self
+            .groups
+            .get_mut(group_index)
+            .and_then(|group| group.tabs.get_mut(drag.tab_index))
+        else {
+            return false;
+        };
+        if !tab.pane_tree.set_ratio(drag.split, ratio) {
+            return false;
+        }
+        self.redraw_counter += 1;
+        true
+    }
+
+    /// Drop every in-flight drag (thumb, splitter, selection edge scroll), e.g.
+    /// when the window loses the pointer.
     pub fn cancel_drag(&mut self) {
         self.scrollbar_drag = None;
+        self.split_drag = None;
+        self.drag_selection_focus = None;
         self.set_auto_scroll(None);
         crate::win_util::release_mouse();
         self.redraw_counter += 1;
@@ -970,8 +1347,9 @@ impl App {
     /// Arm or disarm edge auto-scroll from a selection drag position.
     ///
     /// Triggered only past the pane's first/last row, so the scrollback scrolls
-    /// while the user keeps the button down outside it.
-    fn update_edge_auto_scroll(&mut self, pane_id: PaneId, rect: &crate::pane_tree::Rect, py: f64) {
+    /// while the user keeps the button down outside it. Returns whether the
+    /// armed state changed.
+    fn update_edge_auto_scroll(&mut self, pane_id: PaneId, rect: &crate::pane_tree::Rect, py: f64) -> bool {
         const EDGE_MARGIN: f64 = 6.0;
         let overflow_up = (rect.y + EDGE_MARGIN - py).max(0.0);
         let overflow_down = (py - (rect.y + rect.height - EDGE_MARGIN)).max(0.0);
@@ -988,14 +1366,15 @@ impl App {
             // Ramp with distance: a row per tick at the edge, up to ten.
             Some((overflow, sign)) => {
                 let step = ((1.0 + overflow / 30.0).floor() as i32).clamp(1, 10) * sign;
-                self.set_auto_scroll(Some(AutoScroll { pane_id, step }));
+                self.set_auto_scroll(Some(AutoScroll { pane_id, step }))
             }
             None => self.set_auto_scroll(None),
         }
     }
 
-    /// Set the auto-scroll state, keeping the timer's flag in sync.
-    fn set_auto_scroll(&mut self, auto: Option<AutoScroll>) {
+    /// Set the auto-scroll state, keeping the timer's flag in sync. Returns
+    /// whether the armed state changed.
+    fn set_auto_scroll(&mut self, auto: Option<AutoScroll>) -> bool {
         let changed = self.auto_scroll.is_some() != auto.is_some();
         self.auto_scroll = auto;
         self.auto_scroll_active
@@ -1003,6 +1382,7 @@ impl App {
         if changed {
             self.redraw_counter += 1;
         }
+        changed
     }
 
     /// One timer tick: scroll the pane by one auto-scroll step.
@@ -1049,39 +1429,48 @@ impl App {
     }
 
     /// Handle mouse move/dragging at coordinates (px, py)
-    pub fn handle_mouse_move(&mut self, px: f64, py: f64, is_dragging: bool, shift: bool, alt: bool, ctrl: bool) {
-        // Only repaint when the hover position actually moved: a move event that
-        // lands on the same cell must not re-record the scene.
-        if self.hover_pos != Some((px, py)) {
+///
+/// Returns whether the view actually changed. A move that changes nothing
+/// visible (a pointer travelling over blank terminal space) must not ask for a
+/// repaint: a repaint re-records and re-renders the entire grid.
+pub fn handle_mouse_move(&mut self, px: f64, py: f64, is_dragging: bool, shift: bool, alt: bool, ctrl: bool) -> bool {
+        let mut changed = false;
+        let hover_moved = self.hover_pos != Some((px, py));
+        if hover_moved {
             self.hover_pos = Some((px, py));
-            self.redraw_counter += 1;
+            // Hover only shows up in the settings overlay and the split-pane
+            // close buttons, so everywhere else the move is invisible.
+            changed |= self.hover_affects_paint();
         }
 
         // Scrollbar drag takes precedence over the widget's own drag state: it
         // is driven by `scrollbar_drag`, which outlives the press that set it.
         if let Some(drag) = self.scrollbar_drag {
-            self.update_scrollbar_drag(drag, py);
-            return;
+            return changed | self.update_scrollbar_drag(drag, py);
+        }
+        // A splitter drag outlives its press the same way.
+        if let Some(drag) = self.split_drag {
+            return changed | self.update_split_drag(drag, px, py);
         }
         if !is_dragging {
-            return;
+            return changed;
         }
 
         // When the app captures the mouse, report drag motion instead of selecting.
         if self.try_report_motion(px, py, shift, alt, ctrl) {
-            return;
+            return true;
         }
 
         let active_id = if let Some(pane) = self.active_pane() {
             pane.id
         } else {
-            return;
+            return changed;
         };
 
         let active_rect = if let Some((_, r)) = self.last_pane_layouts.iter().find(|(id, _)| *id == active_id) {
             *r
         } else {
-            return;
+            return changed;
         };
 
         if let Some(group) = self.groups.get_mut(self.active_group_index) {
@@ -1095,15 +1484,30 @@ impl App {
                     let row = (((py - active_rect.y) / self.cell_h).floor().max(0.0) as usize)
                         .min(rows.saturating_sub(1));
 
-                    pane.terminal.update_selection(row as i32, col);
-                    self.redraw_counter += 1;
+                    // Dragging inside the cell the selection already ends in
+                    // cannot change what is on screen.
+                    let focus = (row as i32, col);
+                    if self.drag_selection_focus != Some(focus) {
+                        self.drag_selection_focus = Some(focus);
+                        pane.terminal.update_selection(row as i32, col);
+                        changed = true;
+                    }
                     break;
                 }
             }
         }
 
         // Dragging the selection past a pane's rows keeps the view scrolling.
-        self.update_edge_auto_scroll(active_id, &active_rect, py);
+        changed | self.update_edge_auto_scroll(active_id, &active_rect, py)
+    }
+
+    /// Whether the current pointer position changes what is painted: the
+    /// settings overlay highlights the chip under the pointer, and split panes
+    /// highlight their close button.
+    fn hover_affects_paint(&self) -> bool {
+        self.show_settings
+            || self.pending_group_close.is_some()
+            || self.last_pane_layouts.len() > 1
     }
 
     /// Handle mouse button release up at coordinates (px, py)
@@ -1113,6 +1517,8 @@ impl App {
         // Releasing the button ends any drag and edge auto-scroll, wherever the
         // pointer is.
         self.scrollbar_drag = None;
+        self.split_drag = None;
+        self.drag_selection_focus = None;
         self.set_auto_scroll(None);
         crate::win_util::release_mouse();
 

@@ -16,6 +16,20 @@ use crate::terminal::Terminal;
 /// Handle a keyboard character event with modifier information
 /// This implements the comprehensive direct hotkey table (Windows Ctrl maps to Mac ⌘)
 pub fn handle_key_input(app: &mut App, key: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
+    // ─── Close-workspace confirmation: modal ───
+    // Confirming closes a workspace and every shell in it, so the dialog
+    // swallows keys: Enter confirms, Esc cancels, anything else is ignored.
+    if app.pending_group_close.is_some() {
+        match key {
+            "escape" => app.cancel_close_group(),
+            "enter" => app.confirm_close_group(),
+            _ => {
+                app.redraw_counter += 1;
+            }
+        }
+        return true;
+    }
+
     // ─── System settings overlay: modal ───
     // While it is open every key is consumed by the overlay, so nothing leaks
     // into the terminal PTY.

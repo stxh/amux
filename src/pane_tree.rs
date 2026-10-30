@@ -34,6 +34,57 @@ pub enum SplitDirection {
     Vertical,   // top / bottom
 }
 
+/// Identifier of a split node, in depth-first (draw) order.
+///
+/// Both the layout pass and [`PaneTree::set_ratio`] number splits the same way,
+/// so the renderer can name the split a pointer is being dragged on and the
+/// application can update that split's ratio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SplitId(usize);
+
+impl SplitId {
+    fn new(id: usize) -> Self {
+        Self(id)
+    }
+}
+
+/// Geometry of one pane split's draggable handle.
+///
+/// Produced by [`PaneTree::splits`] for every split, in draw order, so the
+/// application can hit-test and drive the user dragging the divider.
+#[derive(Clone, Copy, Debug)]
+pub struct SplitterGeometry {
+    /// Identifies the split among the tree's splits, in draw order.
+    pub split: SplitId,
+    /// Which axis divides the two subtrees.
+    pub direction: SplitDirection,
+    /// Total length available to this split along its axis, in pixels.
+    pub total: f64,
+    /// Current ratio: the proportion allocated to `first`.
+    pub ratio: f64,
+    /// Absolute bounds of the handle in client coordinates.
+    pub handle: SplitHandle,
+}
+
+/// Bounds of one split's handle, in client coordinates.
+#[derive(Clone, Copy, Debug)]
+pub struct SplitHandle {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl SplitterGeometry {
+    /// Whether the pointer sits on this split's handle.
+    pub fn contains(&self, px: f64, py: f64) -> bool {
+        px >= self.handle.x
+            && px <= self.handle.x + self.handle.w
+            && py >= self.handle.y
+            && py <= self.handle.y + self.handle.h
+    }
+}
+
 /// Recursive pane tree structure
 pub enum PaneTree {
     /// A single terminal pane (leaf node)
@@ -242,6 +293,118 @@ impl PaneTree {
                 result
             }
         }
+    }
+
+    /// All splits of this pane tree, in draw order, with the geometry of their
+    /// draggable handle.
+    ///
+    /// The application uses this to hit-test and drive the user resizing a
+    /// split: a drag on a handle sets the split's ratio.
+    pub fn splits(&self, area: Rect) -> Vec<SplitterGeometry> {
+        let mut out = Vec::new();
+        self.collect_splits(area, &mut out, &mut 0);
+        out
+    }
+
+    fn collect_splits(&self, area: Rect, out: &mut Vec<SplitterGeometry>, next: &mut usize) {
+        match self {
+            PaneTree::Leaf { .. } => {}
+            PaneTree::Split {
+                direction,
+                first,
+                second,
+                ratio,
+            } => {
+                let total = match direction {
+                    SplitDirection::Horizontal => area.width,
+                    SplitDirection::Vertical => area.height,
+                };
+                let (first_area, second_area) = match direction {
+                    SplitDirection::Horizontal => {
+                        let first_w = area.width * ratio;
+                        (
+                            Rect::new(area.x, area.y, first_w, area.height),
+                            Rect::new(area.x + first_w, area.y, area.width - first_w, area.height),
+                        )
+                    }
+                    SplitDirection::Vertical => {
+                        let first_h = area.height * ratio;
+                        (
+                            Rect::new(area.x, area.y, area.width, first_h),
+                            Rect::new(
+                                area.x,
+                                area.y + first_h,
+                                area.width,
+                                area.height - first_h,
+                            ),
+                        )
+                    }
+                };
+                let handle = Self::split_handle(area, *direction, total * ratio);
+                out.push(SplitterGeometry {
+                    split: SplitId::new(*next),
+                    direction: *direction,
+                    total,
+                    ratio: *ratio,
+                    handle,
+                });
+                *next += 1;
+                first.collect_splits(first_area, out, next);
+                second.collect_splits(second_area, out, next);
+            }
+        }
+    }
+
+    /// Bounds of the handle the user drags to resize this split.
+    ///
+    /// The divider itself is a line of negligible thickness; the handle is a
+    /// short strip perpendicular to it, spanning the split's length.
+    fn split_handle(area: Rect, direction: SplitDirection, divider: f64) -> SplitHandle {
+        let width = 10.0;
+        let height = 10.0;
+        match direction {
+            SplitDirection::Horizontal => SplitHandle {
+                x: area.x + divider - width / 2.0,
+                y: area.y,
+                w: width,
+                h: area.height,
+            },
+            SplitDirection::Vertical => SplitHandle {
+                x: area.x,
+                y: area.y + divider - height / 2.0,
+                w: area.width,
+                h: height,
+            },
+        }
+    }
+
+    /// Adjust the ratio of the split identified by `split_id`.
+    ///
+    /// `ratio` is the proportion allocated to `first` (0.0 - 1.0). Returns false
+    /// when the tree contains no such split.
+    pub fn set_ratio(&mut self, split_id: SplitId, ratio: f64) -> bool {
+        let mut next = 0;
+        self.adjust_ratio(split_id, ratio, &mut next)
+    }
+
+    fn adjust_ratio(&mut self, split_id: SplitId, ratio: f64, next: &mut usize) -> bool {
+        let PaneTree::Split {
+            first,
+            second,
+            ratio: current,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        let my_id = SplitId::new(*next);
+        *next += 1;
+        if my_id == split_id {
+            *current = ratio.clamp(0.0, 1.0);
+            return true;
+        }
+        // Depth-first, matching the numbering in `collect_splits`.
+        first.adjust_ratio(split_id, ratio, next) || second.adjust_ratio(split_id, ratio, next)
     }
 
     /// Visit all leaf panes with a callback

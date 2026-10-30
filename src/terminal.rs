@@ -103,6 +103,10 @@ pub struct Terminal {
     shell_aborted: Arc<Mutex<Option<u32>>>,
     pub redraw_notifier: Arc<Mutex<Option<xilem::core::MessageProxy<()>>>>,
     pub title: Arc<Mutex<Option<String>>>,
+    /// Working directory reported by the shell via OSC 7, if it does that.
+    osc_pwd: Arc<Mutex<Option<String>>>,
+    /// Live shell process id, used to read its current directory.
+    shell_pid: Option<u32>,
     sel_anchor: Option<Point>,
 }
 
@@ -112,6 +116,7 @@ impl Terminal {
         let shell_exited = Arc::new(AtomicBool::new(false));
         let shell_aborted = Arc::new(Mutex::new(None));
         let title = Arc::new(Mutex::new(None));
+        let osc_pwd: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let redraw_notifier: Arc<Mutex<Option<xilem::core::MessageProxy<()>>>> =
             Arc::new(Mutex::new(None));
         let pty_writer: Arc<Mutex<Option<Box<dyn Write + Send>>>> = Arc::new(Mutex::new(None));
@@ -155,16 +160,41 @@ impl Terminal {
                     .ok()
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_owned());
-                if let Ok(mut cur) = title.lock() {
-                    if cur.as_deref() != new.as_deref() {
-                        *cur = new;
+                let changed = match title.lock() {
+                    Ok(mut cur) => {
+                        if cur.as_deref() == new.as_deref() {
+                            false
+                        } else {
+                            *cur = new;
+                            true
+                        }
                     }
-                }
-                if let Some(proxy) = &*notifier.lock().unwrap() {
-                    let _ = proxy.message(());
+                    Err(_) => false,
+                };
+                // Only a real change is worth a wake-up: the message re-records
+                // and re-renders the whole grid, and shells repaint their title
+                // (and send OSC 0) far more often than they actually change it.
+                if changed {
+                    if let Some(proxy) = &*notifier.lock().unwrap() {
+                        let _ = proxy.message(());
+                    }
                 }
             })
             .expect("register title handler");
+        }
+
+        // Mirror OSC 7 working-directory reports. Stock Windows shells do not
+        // send them, but bash/zsh (and PowerShell with shell integration) do,
+        // and it costs one cached string to honour them.
+        {
+            let pwd = osc_pwd.clone();
+            term.on_pwd_changed(move |t: &GhosttyTerminal| {
+                let new = t.pwd().ok().filter(|s| !s.is_empty()).map(|s| s.to_owned());
+                if let Ok(mut cur) = pwd.lock() {
+                    *cur = new;
+                }
+            })
+            .expect("register pwd handler");
         }
 
         let render = RenderState::new().expect("failed to create render state");
@@ -183,6 +213,8 @@ impl Terminal {
             shell_aborted,
             redraw_notifier,
             title,
+            osc_pwd,
+            shell_pid: None,
             sel_anchor: None,
         }
     }
@@ -210,6 +242,9 @@ impl Terminal {
         }
 
         let child = pair.slave.spawn_command(cmd)?;
+        // `cd` moves the shell process' own directory, so remember its pid to
+        // read the live path back for the activity-bar tooltip.
+        self.shell_pid = child.process_id();
         self.child_killer = Some(child.clone_killer());
         self.pty_master = Some(pair.master);
 
@@ -260,7 +295,10 @@ impl Terminal {
 
         thread::spawn(move || {
             let mut reader = reader;
-            let mut buf = [0u8; 4096];
+            // Bigger than a pipe's usual granularity: `cat`ing a big file used
+            // to wake the UI once per 4 KiB chunk, and every wake costs a
+            // channel push plus a repaint of the whole grid.
+            let mut buf = [0u8; 65536];
             let mut osc_parser = OscNotificationParser::new();
 
             loop {
@@ -320,17 +358,15 @@ impl Terminal {
     /// Drain pending PTY data into the terminal and report whether a redraw is needed
     pub fn check_and_clear_redraw(&self) -> bool {
         let mut fed = false;
-        loop {
-            let chunk = {
-                let rx = self.pty_rx.lock().unwrap();
-                rx.try_recv()
-            };
-            match chunk {
-                Ok(data) => {
-                    self.engine.borrow_mut().term.vt_write(&data);
-                    fed = true;
-                }
-                Err(_) => break,
+        {
+            // One lock for the whole batch: output usually arrives in bursts,
+            // and taking the channel lock per chunk showed up under heavy
+            // output. No other thread takes this lock, so feeding the engine
+            // while holding it cannot deadlock against the PTY writer.
+            let rx = self.pty_rx.lock().unwrap();
+            while let Ok(data) = rx.try_recv() {
+                self.engine.borrow_mut().term.vt_write(&data);
+                fed = true;
             }
         }
 
@@ -365,6 +401,97 @@ impl Terminal {
         self.title.lock().unwrap().clone()
     }
 
+    /// The shell's current working directory.
+    ///
+    /// Collected while the shell is alive, in order of authority:
+    ///
+    /// 1. OSC 7 — the shell said so itself (needs shell integration).
+    /// 2. The PowerShell prompt on screen — PowerShell's `cd` never moves the
+    ///    process directory, so this is its only live source.
+    /// 3. The shell process' own directory — `cd` moves it for cmd.exe, bash
+    ///    and friends.
+    /// 4. The directory the shell was spawned in, for the moment before any of
+    ///    the above is available.
+    pub fn current_dir(&self) -> Option<String> {
+        // A directory the shell reported itself is authoritative.
+        if let Some(pwd) = self.osc_pwd.lock().ok().and_then(|pwd| pwd.clone()) {
+            return Some(decode_file_url(&pwd));
+        }
+        if self.shell_exited() {
+            return self.config.working_dir.as_ref().map(|p| p.display().to_string());
+        }
+        // PowerShell keeps its own location; only the prompt shows it.
+        if let Some(dir) = self.powershell_dir() {
+            return Some(dir);
+        }
+        // cmd.exe, bash and friends chdir themselves, so their live directory
+        // can be read straight out of the process.
+        if let Some(pid) = self.shell_pid {
+            if let Some(dir) = crate::proc_cwd::process_cwd(pid) {
+                if !dir.is_empty() {
+                    return Some(dir);
+                }
+            }
+        }
+        self.config
+            .working_dir
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
+    }
+
+    /// The directory a PowerShell prompt on screen reports, if the cursor sits
+    /// on one.
+    ///
+    /// `Set-Location` only moves the process directory around native commands
+    /// (it restores it afterwards), so a PowerShell session cannot be followed
+    /// through the process; the default prompt still prints the location, and
+    /// the cursor rests on that line.
+    fn powershell_dir(&self) -> Option<String> {
+        let line = self.cursor_line()?;
+        let path = powershell_prompt_path(&line)?;
+        // A prompt may name a non-filesystem location (`HKLM:\...`) or stale
+        // text; only a real directory is worth showing.
+        std::path::Path::new(path).is_dir().then(|| path.to_string())
+    }
+
+    /// The text of the row the cursor is on, control cells dropped.
+    ///
+    /// Only that one row is read, which is what keeps the prompt check cheap:
+    /// the location has to be looked up on every repaint of the tooltip.
+    fn cursor_line(&self) -> Option<String> {
+        let mut guard = self.engine();
+        // Reborrow the engine as a plain `&mut Engine` so the render, row and
+        // cell iterators are borrowed as separate fields, like `render_grid`
+        // does; going through `RefMut` for each of them would be one borrow of
+        // the whole engine.
+        let eng = &mut *guard;
+        let snapshot = eng.render.update(&eng.term).ok()?;
+        if !snapshot.cursor_visible().ok()? {
+            return None;
+        }
+        let row_idx = snapshot.cursor_viewport().ok().flatten()?.y as usize;
+        let mut row_iter = eng.rows.update(&snapshot).ok()?;
+        let mut line = String::new();
+        let mut glyph = String::new();
+        for idx in 0..=row_idx {
+            let row = row_iter.next()?;
+            if idx < row_idx {
+                continue;
+            }
+            if let Ok(mut cells) = eng.cells.update(row) {
+                while let Some(cell) = cells.next() {
+                    // The C API replaces the buffer, so it is reused per cell.
+                    glyph.clear();
+                    let _ = cell.graphemes_utf8(&mut glyph);
+                    line.extend(glyph.chars().filter(|ch| !ch.is_control()));
+                }
+            }
+            break;
+        }
+        Some(line)
+    }
+
     /// Get the number of columns in the grid
     pub fn grid_cols(&self) -> usize {
         self.engine.borrow().term.cols().unwrap_or(0) as usize
@@ -373,6 +500,26 @@ impl Terminal {
     /// Get the number of rows in the grid
     pub fn grid_rows(&self) -> usize {
         self.engine.borrow().term.rows().unwrap_or(0) as usize
+    }
+
+    /// Where the caret sits, in viewport cells.
+    ///
+    /// A cursor resting on the tail of a wide character belongs to that
+    /// character's first cell, matching where `render_grid` draws the cursor
+    /// block; that is the anchor the IME candidate window should follow.
+    pub fn cursor_cell(&self) -> Option<(u16, u16)> {
+        let mut guard = self.engine();
+        // Reborrow so the render state and the terminal stay separate fields,
+        // like `cursor_line` does.
+        let eng = &mut *guard;
+        let snapshot = eng.render.update(&eng.term).ok()?;
+        let pos = snapshot.cursor_viewport().ok().flatten()?;
+        let col = if pos.at_wide_tail && pos.x > 0 {
+            pos.x - 1
+        } else {
+            pos.x
+        };
+        Some((col, pos.y))
     }
 
     /// True when the hosted app has enabled mouse tracking (DEC 1000/1002/1003...).
@@ -734,5 +881,81 @@ impl OscNotificationParser {
                     .show();
             });
         }
+    }
+}
+
+/// Directory named by a PowerShell prompt line (`PS C:\dir> ...`).
+///
+/// Only the default prompt shape is recognised: a custom prompt (oh-my-posh,
+/// starship) does not print the location, and those sessions need OSC 7 shell
+/// integration instead.
+fn powershell_prompt_path(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("PS ")?;
+    let path = rest.split_once('>')?.0.trim();
+    let mut chars = path.chars();
+    // Drive-qualified only: provider paths (`HKLM:\...`) are not directories.
+    if !chars.next()?.is_ascii_alphabetic() || chars.next()? != ':' {
+        return None;
+    }
+    Some(path)
+}
+
+/// Turn an OSC 7 `file://host/path` report into a filesystem path.
+fn decode_file_url(pwd: &str) -> String {
+    let rest = pwd.strip_prefix("file://").unwrap_or(pwd);
+    // Skip the (usually empty) host component; the path starts at the first
+    // separator after it.
+    let path = match rest.find('/') {
+        Some(idx) => &rest[idx..],
+        None => rest,
+    };
+    let decoded = percent_decode(path);
+    // Windows reports `/C:/dir`; drop the leading slash and use backslashes.
+    if cfg!(target_os = "windows") {
+        let bytes = decoded.as_bytes();
+        if bytes.len() > 2 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
+            return decoded[1..].replace('/', "\\");
+        }
+    }
+    decoded
+}
+
+/// Decode `%XX` escapes in a URL path, keeping multi-byte UTF-8 intact.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(value) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(value);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::powershell_prompt_path;
+
+    #[test]
+    fn powershell_prompt_names_the_directory() {
+        assert_eq!(powershell_prompt_path("PS C:\\Windows> "), Some("C:\\Windows"));
+        assert_eq!(powershell_prompt_path("PS C:\\a> git status"), Some("C:\\a"));
+        assert_eq!(powershell_prompt_path("PS D:\\>"), Some("D:\\"));
+    }
+
+    #[test]
+    fn other_lines_are_not_powershell_prompts() {
+        assert_eq!(powershell_prompt_path("C:\\Windows>"), None);
+        assert_eq!(powershell_prompt_path("PS>"), None);
+        assert_eq!(powershell_prompt_path("PS HKLM:\\>"), None);
+        assert_eq!(powershell_prompt_path(""), None);
     }
 }

@@ -11,37 +11,10 @@ use xilem::masonry::peniko::Color;
 
 /// Frame-time probe, enabled with `AMUX_FRAME_LOG=1`.
 ///
-/// Recording the scene is the expensive half of a frame, so knowing how long it
-/// takes is the difference between guessing and knowing whether scrolling is
-/// GPU-bound or CPU-bound. Reports every 120 frames.
+/// The terminal renderer keeps the phase breakdown (snapshot, cell scan, glyph
+/// pass); this just hands it the frame total.
 pub fn terminal_view_frame_log(elapsed: std::time::Duration) {
-    use std::cell::Cell;
-    use std::sync::atomic::{AtomicU8, Ordering};
-    static ENABLED: AtomicU8 = AtomicU8::new(0);
-    if ENABLED.load(Ordering::Relaxed) == 0 {
-        let on = std::env::var_os("AMUX_FRAME_LOG").is_some() as u8 + 1;
-        ENABLED.store(on, Ordering::Relaxed);
-    }
-    if ENABLED.load(Ordering::Relaxed) != 2 {
-        return;
-    }
-    thread_local! {
-        static STATS: Cell<(u64, u128, u128)> = const { Cell::new((0, 0, 0)) };
-    }
-    STATS.with(|stats| {
-        let us = elapsed.as_micros();
-        let (frames, total, max) = stats.get();
-        let (frames, total, max) = (frames + 1, total + us, max.max(us));
-        stats.set((frames, total, max));
-        if frames >= 120 {
-            eprintln!(
-                "[amux frame] n={frames} avg={:.2}ms max={:.2}ms",
-                total as f64 / 1000.0 / frames as f64,
-                max as f64 / 1000.0
-            );
-            stats.set((0, 0, 0));
-        }
-    });
+    crate::terminal_render::profile_frame(elapsed.as_nanos());
 }
 
 /// 创建终端 canvas 视图（不包含键盘捕获层）
@@ -73,37 +46,29 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
         crate::terminal_render::ensure_symbol_font(fcx);
 
         // Dynamically measure monospace cell dimensions from font metrics.
-        // Use a mixed Latin+CJK probe for cell_h so CJK fallback fonts
-        // (e.g. PingFang on macOS) with taller metrics are accommodated,
-        // preventing Chinese glyph overflow in selection highlighting.
+        // The same probes the renderer uses, read from its cache: building a
+        // parley layout per pane per frame (twice, for width and height) was
+        // pure overhead, since the answer only changes with the font size.
+        // A mixed Latin+CJK probe for cell_h also accommodates CJK fallback
+        // fonts (e.g. PingFang on macOS) with taller metrics, preventing
+        // Chinese glyph overflow in selection highlighting.
         let font_size = state.font_size as f32;
-        use xilem::masonry::parley::style::StyleProperty;
-        let cell_w = {
-            let probe = "MMMMMMMMMM";
-            let mut mb = lcx.ranged_builder(fcx, probe, 1.0, true);
-            mb.push_default(StyleProperty::FontFamily(crate::terminal_render::term_font_family()));
-            mb.push_default(StyleProperty::FontSize(font_size));
-            let mut ml = mb.build(probe);
-            ml.break_all_lines(None);
-            ml.width() as f64 / 10.0
-        };
-        let cell_h = {
-            let probe = "MMMMMMMMMM你好";
-            let mut mb = lcx.ranged_builder(fcx, probe, 1.0, true);
-            mb.push_default(StyleProperty::FontFamily(crate::terminal_render::term_font_family()));
-            mb.push_default(StyleProperty::FontSize(font_size));
-            let mut ml = mb.build(probe);
-            ml.break_all_lines(None);
-            ml.height() as f64
-        };
+        let (cell_w, cell_h, _, _) =
+            crate::terminal_render::cell_metrics_full(fcx, lcx, font_size);
         state.cell_w = cell_w;
         state.cell_h = cell_h;
 
         // 对 pane tree 中的所有 pane 计算布局
         let area = Rect::new(0.0, 0.0, available_size.width, available_size.height);
         let layouts = tab.pane_tree.layout(area);
+        // `last_pane_layouts` is handed to the mouse handlers, so it is owned
+        // by the state instead of rebuilt per frame; `layouts` itself is used
+        // again below, so the state keeps its own copy.
         state.last_pane_layouts = layouts.clone();
         let active_pane_id = tab.active_pane_id;
+
+        // Split dividers, in draw order, for the splitter handles.
+        let splits = tab.pane_tree.splits(area);
 
         // 收集需要 resize 的 pane（先收集，避免借用冲突）
         let mut pending: Vec<(usize, u16, u16)> = Vec::new();
@@ -185,9 +150,54 @@ pub fn terminal_canvas_view(redraw_counter: u64) -> impl WidgetView<App> + use<>
             }
         }
 
+        // Split divider handles: a short strip along each divider. Hovering one
+        // highlights it, exactly like the close button does.
+        let hover = state.hover_pos;
+        for split in &splits {
+            // `Rect` here is the pane-tree rect (x, y, w, h); painting needs
+            // kurbo's (x0, y0, x1, y1).
+            let rect = xilem::masonry::kurbo::Rect::new(
+                split.handle.x,
+                split.handle.y,
+                split.handle.x + split.handle.w,
+                split.handle.y + split.handle.h,
+            );
+            let hovered = hover.map_or(false, |pos| split.contains(pos.0, pos.1));
+            let fill = if hovered {
+                Color::from_rgba8(245, 194, 96, 255)
+            } else {
+                Color::from_rgba8(120, 120, 150, 255)
+            };
+            painter.fill(&rect, fill).draw();
+        }
+
+        // Splitter handles are needed by the mouse handlers too, so publish them
+        // for hit-testing after drawing.
+        state.splitters = splits;
+
         // 系统设置面板（模态，绘制在最上层）
         if state.show_settings {
             crate::terminal_render::render_settings_overlay(
+                &mut painter,
+                state,
+                xilem::masonry::kurbo::Size::new(available_size.width, available_size.height),
+                fcx,
+                lcx,
+            );
+        }
+
+        // 活动栏悬浮提示：画在画布左缘，紧挨着悬停的图标
+        crate::terminal_render::render_sidebar_tooltip(
+            &mut painter,
+            state,
+            xilem::masonry::kurbo::Size::new(available_size.width, available_size.height),
+            fcx,
+            lcx,
+        );
+
+        // 关闭工作区确认框（模态，绘制在最上层）
+        if state.pending_group_close.is_some() {
+            crate::terminal_render::render_confirm_overlay(
                 &mut painter,
                 state,
                 xilem::masonry::kurbo::Size::new(available_size.width, available_size.height),
