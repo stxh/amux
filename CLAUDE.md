@@ -7,7 +7,7 @@ A cross-platform terminal multiplexer combining the Ghostty terminal engine (lib
 - **Type**: Desktop application (terminal emulator/multiplexer)
 - **Language**: Rust
 - **Framework**: Xilem + Masonry (canvas) + Vello
-- **Version**: 0.5.0
+- **Version**: 0.6.0
 
 ## Key Dependencies
 
