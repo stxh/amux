@@ -29,6 +29,9 @@ rustc-ice-*.txt
 # Vendored Ghostty source for libghostty-vt build (large; local only)
 vendor/ghostty-*
 
+# Old Alacritty backend checkout (superseded by Ghostty; local only)
+vendor/alacritty/
+
 # Manual test artifacts (screenshots, driving scripts, clipboard dumps)
 /tools/
 shot*.png
